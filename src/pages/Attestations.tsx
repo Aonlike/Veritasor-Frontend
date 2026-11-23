@@ -1,4 +1,6 @@
 import { Link } from 'react-router-dom'
+import AttestationProgress from '../components/AttestationProgress'
+import StatusTimeline from '../components/StatusTimeline'
 
 type AttestationStatus = 'pending' | 'verified' | 'failed'
 
@@ -304,6 +306,9 @@ export default function Attestations() {
           timeline for each run.
         </p>
       </header>
+
+      <AttestationProgress />
+      <StatusTimeline />
 
       {attestations.length === 0 ? (
         <EmptyState />

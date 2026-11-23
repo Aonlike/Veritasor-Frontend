@@ -25,6 +25,17 @@ npm run dev
 
 The dev server proxies `/api` to `http://localhost:3000` (backend). Start the backend for full functionality.
 
+## Attestation status updates
+
+The attestations page listens for server-sent events at `GET /api/attestations/events`. Each event is JSON with an
+`id`, `attestationId`, and `status` (`pending`, `collecting`, `verifying`, `building_merkle_root`, `publishing`,
+`verified`, `failed`, or `canceled`); `step`, `message`, and `timestamp` are optional. Reconnection includes the last
+received event id as the `lastEventId` query parameter.
+
+If the event stream is unavailable, the frontend polls `GET /api/attestations/status`, passing the last received id as
+the `since` query parameter. The response is either an array of status events or an object with an `updates` array.
+Streaming and polling pause while offline and resume when connectivity returns.
+
 ## Scripts
 
 | Command   | Description              |
