@@ -1,14 +1,96 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ConfirmDialog from '../ConfirmDialog'
 import { useToast } from '../ToastContext'
+import {
+  SCOPE_GROUPS,
+  ALL_SCOPE_IDS,
+  type ScopeId,
+  getScopeLabels,
+  groupTriState,
+} from './scopeDefinitions'
+import { randomBase36, randomHex } from '../../utils/secureRandom'
+import type { ApiKey } from './apiKeyTypes'
+import { generateApiKeyCredentials } from '../../utils/apiKeyCredentials'
 
-const AVAILABLE_SCOPES = [
-  { id: 'read:attestations', label: 'Read attestations', description: 'View attestation history and on-chain proof details.' },
-  { id: 'write:attestations', label: 'Write attestations', description: 'Trigger attestations for revenue reports.' },
-  { id: 'read:sources', label: 'Read revenue sources', description: 'View connected revenue source metadata.' },
+// ─── Scope definitions ─────────────────────────────────────────────────
+
+interface ScopeItem {
+  id: string
+  label: string
+  description: string
+}
+
+interface ScopeGroup {
+  id: string
+  label: string
+  description: string
+  scopes: ScopeItem[]
+}
+
+const SCOPE_GROUPS: ScopeGroup[] = [
+  {
+    id: 'attestations',
+    label: 'Attestations',
+    description: 'Create and manage revenue attestations',
+    scopes: [
+      { id: 'read:attestations', label: 'Read attestations', description: 'View attestation history and on-chain proof details.' },
+      { id: 'write:attestations', label: 'Write attestations', description: 'Trigger attestations for revenue reports.' },
+    ],
+  },
+  {
+    id: 'sources',
+    label: 'Revenue Sources',
+    description: 'Manage connected revenue data sources',
+    scopes: [
+      { id: 'read:sources', label: 'Read revenue sources', description: 'View connected revenue source metadata.' },
+      { id: 'write:sources', label: 'Write revenue sources', description: 'Connect and configure new revenue sources.' },
+    ],
+  },
+  {
+    id: 'webhooks',
+    label: 'Webhooks',
+    description: 'Manage webhook endpoints and deliveries',
+    scopes: [
+      { id: 'read:webhooks', label: 'Read webhooks', description: 'View webhook configurations and delivery history.' },
+      { id: 'write:webhooks', label: 'Write webhooks', description: 'Create and modify webhook endpoints.' },
+    ],
+  },
+  {
+    id: 'keys',
+    label: 'API Keys',
+    description: 'Manage API key lifecycle',
+    scopes: [
+      { id: 'read:keys', label: 'Read API keys', description: 'View API key metadata (masked values only).' },
+      { id: 'write:keys', label: 'Write API keys', description: 'Create, rotate, and revoke API keys.' },
+    ],
+  },
+  {
+    id: 'administration',
+    label: 'Administration',
+    description: 'Grant full administrative access',
+    scopes: [
+      { id: 'admin', label: 'Administrator access', description: 'Manage all Veritasor resources and settings.' },
+    ],
+  },
 ]
 
-type ScopeId = (typeof AVAILABLE_SCOPES)[number]['id']
+/** Flat map of every scope id for quick lookup. */
+const ALL_SCOPE_IDS: string[] = SCOPE_GROUPS.flatMap((g) => g.scopes.map((s) => s.id))
+
+type ScopeId = string
+
+// ─── Helpers ───────────────────────────────────────────────────────────
+
+/** Returns the tri-state for a group: 'all' | 'some' | 'none' */
+function groupTriState(group: ScopeGroup, selected: ScopeId[]): 'all' | 'some' | 'none' {
+  const ids = group.scopes.map((s) => s.id)
+  const checked = ids.filter((id) => selected.includes(id)).length
+  if (checked === 0) return 'none'
+  if (checked === ids.length) return 'all'
+  return 'some'
+}
+
+// ─── Component ─────────────────────────────────────────────────────────
 
 export default function CreateApiKeyModal({
   open,
@@ -17,34 +99,101 @@ export default function CreateApiKeyModal({
 }: {
   open: boolean
   onClose: () => void
-  onMinted: (keyId: string, fullKey: string) => void
+  onMinted: (key: ApiKey, fullKey: string) => void
 }) {
   const { addToast } = useToast()
   const [label, setLabel] = useState('Admin key')
   const [expiryDays, setExpiryDays] = useState(90)
   const [selected, setSelected] = useState<ScopeId[]>(['read:attestations'])
+  const [scopeQuery, setScopeQuery] = useState('')
+
+  // Refs for indeterminate checkbox state
+  const groupRefs = useRef<Map<string, HTMLInputElement>>(new Map())
 
   const [error, setError] = useState<string | null>(null)
   const [confirmOpen, setConfirmOpen] = useState(false)
 
-  const chosenScopes = useMemo(() => {
-    return AVAILABLE_SCOPES.filter((s) => selected.includes(s.id as ScopeId))
+  // ── Derived state ────────────────────────────────────────────────────
+
+  /** Total number of scopes selected (across all groups). */
+  const selectedCount = selected.length
+  const totalScopeCount = ALL_SCOPE_IDS.length
+
+  const chosenLabels = useMemo(() => {
+    return getScopeLabels(selected)
   }, [selected])
+
+  /** Groups filtered by search query. A group is shown if its label or any of its scope labels/descriptions match. */
+  const filteredGroups = useMemo(() => {
+    const q = scopeQuery.trim().toLowerCase()
+    if (!q) return SCOPE_GROUPS
+    return SCOPE_GROUPS
+      .map((group) => ({
+        ...group,
+        scopes: group.scopes.filter(
+          (s) =>
+            s.label.toLowerCase().includes(q) || s.description.toLowerCase().includes(q),
+        ),
+      }))
+      .filter(
+        (group) =>
+          group.label.toLowerCase().includes(q) || group.scopes.length > 0,
+      )
+  }, [scopeQuery])
+
+  // ── Reset on open ────────────────────────────────────────────────────
 
   useEffect(() => {
     if (!open) {
       setError(null)
       setConfirmOpen(false)
-      // reset for demo
+      setScopeQuery('')
       setLabel('Admin key')
       setExpiryDays(90)
       setSelected(['read:attestations'])
     }
   }, [open])
 
-  function toggleScope(id: ScopeId) {
+  // ── Sync indeterminate on group checkboxes ───────────────────────────
+
+  useEffect(() => {
+    for (const group of SCOPE_GROUPS) {
+      const el = groupRefs.current.get(group.id)
+      if (el) {
+        const tri = groupTriState(group, selected)
+        el.indeterminate = tri === 'some'
+      }
+    }
+  }, [selected])
+
+  // ── Handlers ─────────────────────────────────────────────────────────
+
+  const toggleScope = useCallback((id: ScopeId) => {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
-  }
+  }, [])
+
+  const toggleGroup = useCallback((group: ScopeGroup) => {
+    const ids = group.scopes.map((s) => s.id)
+    setSelected((prev) => {
+      const tri = groupTriState(group, prev)
+      if (tri === 'all') {
+        // Deselect all scopes in this group
+        return prev.filter((id) => !ids.includes(id))
+      }
+      // Select all scopes in this group (handles 'some' and 'none')
+      const existing = new Set(prev)
+      for (const id of ids) existing.add(id)
+      return Array.from(existing)
+    })
+  }, [])
+
+  const selectAll = useCallback(() => {
+    setSelected([...ALL_SCOPE_IDS])
+  }, [])
+
+  const clearAll = useCallback(() => {
+    setSelected([])
+  }, [])
 
   function validate() {
     if (label.trim().length < 2) return 'Add a label (at least 2 characters).'
@@ -63,20 +212,44 @@ export default function CreateApiKeyModal({
     setConfirmOpen(true)
   }
 
-  const keyId = useMemo(() => `key_${Math.random().toString(36).slice(2, 8)}`, [open])
+  const keyId = useMemo(() => `key_${randomBase36(6)}`, [])
 
   function mint() {
     // Demo-only: generate a fake secret.
     // Real implementation would come from backend and only reveal it once.
-    const fullKey = `vtsr_live_${Math.random().toString(16).slice(2, 14)}${Math.random().toString(16).slice(2, 10)}_${Math.random().toString(16).slice(2, 6)}`
+    const fullKey = `vtsr_live_${randomHex(6)}${randomHex(4)}_${randomHex(2)}`
+  function mint() {
+    let credentials: ReturnType<typeof generateApiKeyCredentials>
+    try {
+      credentials = generateApiKeyCredentials()
+    } catch {
+      const message = 'Unable to securely generate an API key in this browser.'
+      setError(message)
+      addToast(message, 'error', 0)
+      setConfirmOpen(false)
+      return
+    }
+
+    const createdAt = new Date()
+    const key: ApiKey = {
+      id: credentials.keyId,
+      label: label.trim(),
+      status: 'active',
+      createdAt: createdAt.toISOString(),
+      expiresAt: new Date(createdAt.getTime() + expiryDays * 86400000).toISOString(),
+      scopes: [...selected],
+      maskedKey: `${credentials.fullKey.slice(0, 12)}…${credentials.fullKey.slice(-4)}`,
+    }
     setConfirmOpen(false)
-    onMinted(keyId, fullKey)
+    onMinted(key, credentials.fullKey)
   }
 
   return (
     <>
       {open && (
+        // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- backdrop click dismisses modal; Escape key is handled via keydown listener
         <div className="modal-backdrop" onClick={() => (!confirmOpen ? onClose() : undefined)}>
+          {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions -- stops click propagation from dialog to backdrop */}
           <div
             className="modal-dialog"
             role="dialog"
@@ -129,37 +302,226 @@ export default function CreateApiKeyModal({
                   </div>
 
                   <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: '0.65rem' }}>
-                    <legend style={{ fontWeight: 800, color: 'var(--text)' }}>Scopes</legend>
-                    <div style={{ display: 'grid', gap: '0.55rem' }}>
-                      {AVAILABLE_SCOPES.map((scope) => {
-                        const checked = selected.includes(scope.id as ScopeId)
-                        return (
-                          <label
-                            key={scope.id}
-                            style={{
-                              display: 'flex',
-                              gap: '0.75rem',
-                              alignItems: 'flex-start',
-                              padding: '0.8rem 0.9rem',
-                              borderRadius: 'var(--radius-sm)',
-                              border: '1px solid var(--border)',
-                              background: checked ? 'rgba(94, 234, 212, 0.08)' : 'rgba(15, 23, 42, 0.15)',
-                            }}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() => toggleScope(scope.id as ScopeId)}
-                              aria-label={scope.label}
-                            />
-                            <span style={{ display: 'grid', gap: '0.15rem' }}>
-                              <strong style={{ color: 'var(--text)' }}>{scope.label}</strong>
-                              <span style={{ color: 'var(--muted)', fontSize: '0.9rem', lineHeight: 1.5 }}>{scope.description}</span>
-                            </span>
-                          </label>
-                        )
-                      })}
+                    <legend style={{ fontWeight: 800, color: 'var(--text)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
+                      <span>Scopes</span>
+                      {/* Selected-count summary */}
+                      <span
+                        aria-live="polite"
+                        aria-atomic="true"
+                        style={{
+                          fontSize: '0.84rem',
+                          fontWeight: 600,
+                          padding: '0.28rem 0.65rem',
+                          borderRadius: 999,
+                          border: `1px solid ${selectedCount > 0 ? 'rgba(94, 234, 212, 0.35)' : 'var(--border)'}`,
+                          background: selectedCount > 0 ? 'rgba(94, 234, 212, 0.08)' : 'var(--surface-soft)',
+                          color: selectedCount > 0 ? 'var(--accent)' : 'var(--muted)',
+                          transition: 'border-color 160ms ease, background 160ms ease, color 160ms ease',
+                        }}
+                      >
+                        {selectedCount}&thinsp;/&thinsp;{totalScopeCount} selected
+                      </span>
+                    </legend>
+
+                    {/* Search filter */}
+                    <div style={{ position: 'relative' }}>
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          position: 'absolute',
+                          left: '0.85rem',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          color: 'var(--muted)',
+                          fontSize: '0.85rem',
+                          pointerEvents: 'none',
+                        }}
+                      >
+                        🔍
+                      </span>
+                      <input
+                        type="search"
+                        value={scopeQuery}
+                        onChange={(e) => setScopeQuery(e.target.value)}
+                        placeholder="Filter scopes…"
+                        aria-label="Filter scopes by name or description"
+                        className="auth-input"
+                        style={{ paddingLeft: '2.3rem', minHeight: '2.75rem' }}
+                      />
                     </div>
+
+                    {/* Quick actions */}
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        onClick={selectAll}
+                        disabled={selectedCount === totalScopeCount}
+                        className="app-button app-button-secondary"
+                        style={{ width: 'auto', minHeight: '2.25rem', padding: '0.35rem 0.75rem', fontSize: '0.82rem', fontWeight: 600 }}
+                        aria-label="Select all scopes"
+                      >
+                        Select all
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clearAll}
+                        disabled={selectedCount === 0}
+                        className="app-button app-button-secondary"
+                        style={{ width: 'auto', minHeight: '2.25rem', padding: '0.35rem 0.75rem', fontSize: '0.82rem', fontWeight: 600 }}
+                        aria-label="Clear all scopes"
+                      >
+                        Clear all
+                      </button>
+                    </div>
+
+                    {/* Grouped scope tree */}
+                    {filteredGroups.length === 0 ? (
+                      <p
+                        role="status"
+                        style={{
+                          margin: 0,
+                          padding: '1.5rem 1rem',
+                          textAlign: 'center',
+                          color: 'var(--muted)',
+                          fontSize: '0.92rem',
+                          border: '1px dashed var(--border)',
+                          borderRadius: 'var(--radius-sm)',
+                        }}
+                      >
+                        No scopes match <strong style={{ color: 'var(--text)' }}>&ldquo;{scopeQuery}&rdquo;</strong>
+                      </p>
+                    ) : (
+                      <ul
+                        role="tree"
+                        aria-label="Scope groups"
+                        style={{
+                          listStyle: 'none',
+                          margin: 0,
+                          padding: 0,
+                          display: 'grid',
+                          gap: '0.85rem',
+                        }}
+                      >
+                        {filteredGroups.map((group) => {
+                          const realGroup = SCOPE_GROUPS.find((g) => g.id === group.id)!
+                          const tri = groupTriState(realGroup, selected)
+                          const groupChecked = tri === 'all'
+                          const groupSome = tri === 'some'
+
+                          return (
+                            <li
+                              key={group.id}
+                              role="treeitem"
+                              aria-selected={groupChecked}
+                              aria-expanded="true"
+                              style={{
+                                border: `1px solid ${groupChecked || groupSome ? 'rgba(94, 234, 212, 0.28)' : 'var(--border)'}`,
+                                borderRadius: 'var(--radius-sm)',
+                                background: groupChecked || groupSome ? 'rgba(94, 234, 212, 0.04)' : 'rgba(15, 23, 42, 0.2)',
+                                overflow: 'hidden',
+                                transition: 'border-color 160ms ease, background 160ms ease',
+                              }}
+                            >
+                              {/* Group header with tri-state checkbox */}
+                              <label
+                                style={{
+                                  display: 'flex',
+                                  gap: '0.7rem',
+                                  alignItems: 'flex-start',
+                                  padding: '0.7rem 0.9rem',
+                                  cursor: 'pointer',
+                                  borderBottom: `1px solid ${groupChecked || groupSome ? 'rgba(94, 234, 212, 0.18)' : 'var(--border)'}`,
+                                  background: groupChecked || groupSome ? 'rgba(94, 234, 212, 0.06)' : 'transparent',
+                                }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  ref={(el) => {
+                                    if (el) {
+                                      el.indeterminate = groupSome
+                                      groupRefs.current.set(realGroup.id, el)
+                                    }
+                                  }}
+                                  checked={groupChecked}
+                                  onChange={() => toggleGroup(realGroup)}
+                                  aria-label={`Toggle all ${group.label} scopes`}
+                                  style={{ marginTop: '0.2rem', accentColor: 'var(--accent)', width: '1rem', height: '1rem', flexShrink: 0 }}
+                                />
+                                <span style={{ display: 'grid', gap: '0.1rem' }}>
+                                  <span style={{ fontWeight: 700, color: 'var(--text)', fontSize: '0.95rem' }}>
+                                    {group.label}
+                                  </span>
+                                  <span style={{ color: 'var(--muted)', fontSize: '0.82rem', lineHeight: 1.5 }}>
+                                    {group.description}
+                                  </span>
+                                </span>
+                              </label>
+
+                              {/* Group children */}
+                              <ul
+                                role="group"
+                                aria-label={`${group.label} scopes`}
+                                style={{
+                                  listStyle: 'none',
+                                  margin: 0,
+                                  padding: '0.45rem 0.45rem',
+                                  display: 'grid',
+                                  gap: '0.2rem',
+                                }}
+                              >
+                                {group.scopes.map((scope) => {
+                                  const checked = selected.includes(scope.id)
+                                  return (
+                                    <li key={scope.id} role="treeitem" aria-selected={checked}>
+                                      <label
+                                        style={{
+                                          display: 'flex',
+                                          gap: '0.7rem',
+                                          alignItems: 'flex-start',
+                                          padding: '0.55rem 0.7rem',
+                                          borderRadius: 'calc(var(--radius-sm) - 0.25rem)',
+                                          cursor: 'pointer',
+                                          background: checked ? 'rgba(94, 234, 212, 0.08)' : 'transparent',
+                                          transition: 'background 120ms ease',
+                                        }}
+                                        onMouseEnter={(e) => {
+                                          if (!checked) (e.currentTarget as HTMLElement).style.background = 'rgba(148, 163, 184, 0.06)'
+                                        }}
+                                        onMouseLeave={(e) => {
+                                          if (!checked) (e.currentTarget as HTMLElement).style.background = 'transparent'
+                                        }}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          onChange={() => toggleScope(scope.id)}
+                                          aria-label={scope.label}
+                                          style={{
+                                            marginTop: '0.15rem',
+                                            accentColor: 'var(--accent)',
+                                            width: '1rem',
+                                            height: '1rem',
+                                            flexShrink: 0,
+                                          }}
+                                        />
+                                        <span style={{ display: 'grid', gap: '0.1rem' }}>
+                                          <span style={{ fontWeight: 600, color: 'var(--text)', fontSize: '0.9rem' }}>
+                                            {scope.label}
+                                          </span>
+                                          <span style={{ color: 'var(--muted)', fontSize: '0.82rem', lineHeight: 1.5 }}>
+                                            {scope.description}
+                                          </span>
+                                        </span>
+                                      </label>
+                                    </li>
+                                  )
+                                })}
+                              </ul>
+                            </li>
+                          )
+                        })}
+                      </ul>
+                    )}
                   </fieldset>
 
                   {error && (
@@ -193,7 +555,7 @@ export default function CreateApiKeyModal({
       <ConfirmDialog
         open={confirmOpen}
         title="Confirm key creation?"
-        description={`This key will be created with ${chosenScopes.length} scope(s) and will expire in ${expiryDays} day(s).`}
+        description={`This key will be created with ${selectedCount} scope(s) (${chosenLabels.join(', ')}) and will expire in ${expiryDays} day(s).`}
         confirmText="Create key"
         cancelText="Back"
         onClose={() => setConfirmOpen(false)}
@@ -203,3 +565,48 @@ export default function CreateApiKeyModal({
   )
 }
 
+import { useEffect, useMemo, useState } from 'react'
+const AVAILABLE_SCOPES = [
+  { id: 'read:attestations', label: 'Read attestations', description: 'View attestation history and on-chain proof details.' },
+  { id: 'write:attestations', label: 'Write attestations', description: 'Trigger attestations for revenue reports.' },
+  { id: 'read:sources', label: 'Read revenue sources', description: 'View connected revenue source metadata.' },
+type ScopeId = (typeof AVAILABLE_SCOPES)[number]['id']
+  onMinted: (keyId: string, fullKey: string) => void
+  const chosenScopes = useMemo(() => {
+    return AVAILABLE_SCOPES.filter((s) => selected.includes(s.id as ScopeId))
+      // reset for demo
+  function toggleScope(id: ScopeId) {
+  const keyId = useMemo(() => `key_${Math.random().toString(36).slice(2, 8)}`, [open])
+    const fullKey = `vtsr_live_${Math.random().toString(16).slice(2, 14)}${Math.random().toString(16).slice(2, 10)}_${Math.random().toString(16).slice(2, 6)}`
+    onMinted(keyId, fullKey)
+                    <legend style={{ fontWeight: 800, color: 'var(--text)' }}>Scopes</legend>
+                    <div style={{ display: 'grid', gap: '0.55rem' }}>
+                      {AVAILABLE_SCOPES.map((scope) => {
+                        const checked = selected.includes(scope.id as ScopeId)
+                        return (
+                          <label
+                            key={scope.id}
+                            style={{
+                              display: 'flex',
+                              gap: '0.75rem',
+                              alignItems: 'flex-start',
+                              padding: '0.8rem 0.9rem',
+                              borderRadius: 'var(--radius-sm)',
+                              border: '1px solid var(--border)',
+                              background: checked ? 'rgba(94, 234, 212, 0.08)' : 'rgba(15, 23, 42, 0.15)',
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleScope(scope.id as ScopeId)}
+                              aria-label={scope.label}
+                            />
+                            <span style={{ display: 'grid', gap: '0.15rem' }}>
+                              <strong style={{ color: 'var(--text)' }}>{scope.label}</strong>
+                              <span style={{ color: 'var(--muted)', fontSize: '0.9rem', lineHeight: 1.5 }}>{scope.description}</span>
+                            </span>
+                          </label>
+                        )
+                      })}
+        description={`This key will be created with ${chosenScopes.length} scope(s) and will expire in ${expiryDays} day(s).`}

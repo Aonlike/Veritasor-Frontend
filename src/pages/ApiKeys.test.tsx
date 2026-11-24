@@ -1,0 +1,72 @@
+import { beforeEach, describe, expect, it } from 'vitest'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import ApiKeys from './ApiKeys'
+import { ToastProvider } from '../components/ToastContext'
+import { apiKeysStore } from '../store/apiKeysStore'
+
+function renderPage() {
+  return render(
+    <ToastProvider>
+      <MemoryRouter>
+        <ApiKeys />
+      </MemoryRouter>
+    </ToastProvider>,
+  )
+}
+
+describe('ApiKeys page', () => {
+  beforeEach(() => {
+    apiKeysStore.reset()
+  })
+
+  it('renders the seeded keys and the create action', () => {
+    renderPage()
+
+    expect(screen.getByRole('heading', { name: 'API keys' })).toBeInTheDocument()
+    expect(screen.getByText('Admin (rotatable)')).toBeInTheDocument()
+    expect(screen.getByText('Auditor (read-only)')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create key' })).toBeInTheDocument()
+  })
+
+  it('creates a scoped key and reveals its secret only until dismissed', () => {
+    renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Create key' }))
+    fireEvent.change(screen.getByLabelText('Label'), { target: { value: 'Deploy integration' } })
+    fireEvent.change(screen.getByLabelText(/expiry/i), { target: { value: '30' } })
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Administrator access' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+    const confirmDialog = screen.getByRole('dialog', { name: /confirm key creation/i })
+    fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Create key' }))
+
+    const revealRegion = screen.getByRole('region', { name: 'New API key revealed' })
+    expect(revealRegion).toBeInTheDocument()
+    const storedKey = apiKeysStore.getAll()[0]
+    expect(storedKey.label).toBe('Deploy integration')
+    expect(storedKey.scopes).toEqual(['read:attestations', 'admin'])
+    expect(Date.parse(storedKey.expiresAt) - Date.parse(storedKey.createdAt)).toBe(30 * 86400000)
+    expect(storedKey.maskedKey).toMatch(/^vtsr_live_[a-f0-9]{2}…[a-f0-9]{4}$/)
+
+    const revealedSecret = revealRegion.textContent?.match(/vtsr_live_[a-f0-9]{48}/)?.[0]
+    expect(revealedSecret).toBeTruthy()
+    expect(document.body.textContent).toContain(revealedSecret)
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+    expect(document.body.textContent).not.toContain(revealedSecret)
+    expect(screen.queryByRole('region', { name: 'New API key revealed' })).not.toBeInTheDocument()
+  })
+
+  it('shows key details and protects the last active administrator key from revocation', () => {
+    renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Create key' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Administrator access' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create' }))
+    const confirmDialog = screen.getByRole('dialog', { name: /confirm key creation/i })
+    fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Create key' }))
+
+    const adminKeyRow = screen.getByRole('group', { name: /API key Admin key/ })
+    fireEvent.click(within(adminKeyRow).getByRole('button', { name: 'View details for Admin key' }))
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByText(apiKeysStore.getAll()[0].id)).toBeInTheDocument()
+    expect(within(adminKeyRow).getByRole('button', { name: 'Revoke' })).toBeDisabled()
+  })
+})

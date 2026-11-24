@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
-import type { ApiKey, ApiKeyStatus } from './apiKeyTypes'
+import type { ApiKey, ApiKeyStatus, DependentUsage } from './apiKeyTypes'
 import ConfirmDialog from '../ConfirmDialog'
+import RevokeKeyDialog from './RevokeKeyDialog'
 import { useToast } from '../ToastContext'
 
 function statusMeta(status: ApiKeyStatus) {
@@ -17,16 +18,24 @@ export default function KeyRow({
   keyItem,
   mintedOnce,
   isLastAdminKey = false,
+  dependentUsages = null,
   onRotate,
   onRevoke,
   onCopyMasked,
+  onDetails,
 }: {
   keyItem: ApiKey
   mintedOnce: string | null
   isLastAdminKey?: boolean
+  /**
+   * Dependent usages for the revoke confirmation dialog.
+   * Pass `null` (default) when usage data is unavailable.
+   */
+  dependentUsages?: DependentUsage[] | null
   onCopyMasked: (key: ApiKey) => void
   onRotate: (id: string) => void
   onRevoke: (id: string) => void
+  onDetails: (key: ApiKey) => void
 }) {
   const meta = useMemo(() => statusMeta(keyItem.status), [keyItem.status])
   const { addToast } = useToast()
@@ -42,7 +51,7 @@ export default function KeyRow({
   }
 
   return (
-    <li
+    <div role="group"
       aria-label={`API key ${keyItem.label}, ${meta.label}${isLastAdminKey ? ', Critical Last Admin Key' : ''}`}
       style={{
         padding: '1rem 1.1rem',
@@ -168,6 +177,15 @@ export default function KeyRow({
               type="button"
               className="app-button app-button-secondary"
               style={{ width: 'auto' }}
+              onClick={() => onDetails(keyItem)}
+              aria-label={`View details for ${keyItem.label}`}
+            >
+              Details
+            </button>
+            <button
+              type="button"
+              className="app-button app-button-secondary"
+              style={{ width: 'auto' }}
               disabled={!canRotate}
               onClick={() => setRotateOpen(true)}
             >
@@ -206,13 +224,10 @@ export default function KeyRow({
       )}
 
       {revokeOpen && (
-        <ConfirmDialog
+        <RevokeKeyDialog
           open={revokeOpen}
-          title="Revoke API key?"
-          description="Revoking immediately invalidates the key. This action cannot be undone."
-          confirmText="Revoke"
-          cancelText="Cancel"
-          tone="danger"
+          keyItem={keyItem}
+          dependentUsages={dependentUsages}
           onClose={() => setRevokeOpen(false)}
           onConfirm={() => {
             setRevokeOpen(false)
@@ -220,6 +235,13 @@ export default function KeyRow({
           }}
         />
       )}
-    </li>
+    </div>
   )
 }
+import type { ApiKey, ApiKeyStatus } from './apiKeyTypes'
+    <li
+          title="Revoke API key?"
+          description="Revoking immediately invalidates the key. This action cannot be undone."
+          confirmText="Revoke"
+          tone="danger"
+    </li>

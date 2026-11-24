@@ -1,3 +1,24 @@
+import { useEffect, useReducer } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import CredentialsState from "./login/CredentialsState";
+import MfaChallengeState from "./login/MfaChallengeState";
+import MfaRecoveryFlowState from "./login/MfaRecoveryFlowState";
+import {
+  createInitialLoginState,
+  isForcedRecoveryParam,
+  loginReducer,
+} from "./login/loginMachine";
+
+export default function Login() {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const forcedState = searchParams.get("state");
+
+  const [machine, dispatch] = useReducer(
+    loginReducer,
+    forcedState,
+    createInitialLoginState,
+  );
 import { Link } from "react-router-dom";
 
 import AuthShell from "../components/AuthShell";
@@ -37,57 +58,41 @@ export default function Login() {
           />
         </div>
 
-        <div className="auth-input-group">
-          <div className="auth-label-row">
-            <label className="auth-label" htmlFor="login-password">
-              Password
-            </label>
-            <Link to="/forgot-password" className="auth-inline-link">
-              Forgot password?
-            </Link>
-          </div>
-          <input
-            id="login-password"
-            className="auth-input auth-input-error"
-            type="password"
-            placeholder="Enter your password"
-            autoComplete="current-password"
-            aria-describedby="login-password-error"
-            defaultValue="badpass"
-          />
-          <p
-            id="login-password-error"
-            className="auth-message auth-message-error"
-            role="alert"
-          >
-            <span aria-hidden="true" className="auth-message-icon">
-              !
-            </span>
-            Your password must include at least 12 characters and one symbol.
-          </p>
-        </div>
+  useEffect(() => {
+    if (isForcedRecoveryParam(forcedState)) {
+      dispatch({ type: "START_RECOVERY" });
+    }
+  }, [forcedState]);
 
-        <label className="auth-checkbox">
-          <input type="checkbox" defaultChecked />
-          <span>Keep this device trusted for 30 days</span>
-        </label>
+  const returnToCredentials = () => {
+    dispatch({ type: "RETURN_TO_CREDENTIALS" });
+    navigate("/login", { replace: true });
+  };
 
-        <div className="auth-actions">
-          <button type="submit" className="auth-button auth-button-primary">
-            Sign in
-          </button>
-          <button type="button" className="auth-button auth-button-secondary">
-            Continue with Google
-          </button>
-          <button
-            type="button"
-            className="auth-button auth-button-ghost"
-            disabled
-          >
-            SSO loading...
-          </button>
-        </div>
-      </form>
-    </AuthShell>
+  if (machine.step === "mfa-recovery") {
+    return (
+      <MfaRecoveryFlowState
+        step={machine.recoveryStep}
+        path={machine.recoveryPath}
+        dispatch={dispatch}
+        onBack={returnToCredentials}
+        onSuccess={() => navigate("/dashboard")}
+      />
+    );
+  }
+
+  if (machine.step === "mfa-challenge") {
+    return (
+      <MfaChallengeState
+        onBack={returnToCredentials}
+        onSuccess={() => navigate("/dashboard")}
+      />
+    );
+  }
+
+  return (
+    <CredentialsState
+      onContinue={() => dispatch({ type: "CREDENTIALS_SUBMITTED" })}
+    />
   );
 }

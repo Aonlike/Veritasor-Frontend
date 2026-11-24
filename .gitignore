@@ -3,4 +3,13 @@ dist
 *.local
 .env
 .env.*
+!.env.example
 .DS_Store
+mingit/
+branch_structure.json
+
+coverage
+playwright-report
+test-results
+*.tsbuildinfo
+.vercel

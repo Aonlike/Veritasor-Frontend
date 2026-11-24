@@ -1,8 +1,11 @@
-import { render, screen, act } from '@testing-library/react'
+import { render, screen, act, fireEvent } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { useToast } from '../components/ToastContext'
+import { ToastProvider, useToast } from '../components/ToastContext'
 import Layout from '../components/Layout'
+import { EnvironmentProvider } from '../components/EnvironmentContext'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
+import { CookieConsentProvider } from '../components/CookieConsentContext'
+import { LocaleProvider } from '../i18n/provider'
 
 // Test helper component to trigger toasts
 function TestTrigger() {
@@ -29,13 +32,19 @@ describe('Toast Notification System', () => {
 
   const renderSystem = () => {
     return render(
-      <MemoryRouter initialEntries={['/']}>
-        <Routes>
-          <Route path="/" element={<Layout />}>
-            <Route index element={<TestTrigger />} />
-          </Route>
-        </Routes>
-      </MemoryRouter>
+      <EnvironmentProvider>
+        <LocaleProvider>
+          <MemoryRouter initialEntries={['/']}>
+            <CookieConsentProvider>
+              <Routes>
+                <Route path="/" element={<Layout />}>
+                  <Route index element={<TestTrigger />} />
+                </Route>
+              </Routes>
+            </CookieConsentProvider>
+          </MemoryRouter>
+        </LocaleProvider>
+      </EnvironmentProvider>
     )
   }
 
@@ -78,9 +87,12 @@ describe('Toast Notification System', () => {
     expect(screen.getByText('Success message')).toBeInTheDocument()
     expect(screen.getByText('Error message')).toBeInTheDocument()
 
-    // Fast-forward 5 seconds
+    // Fast-forward 5 seconds and allow the exit animation to finish
     act(() => {
       vi.advanceTimersByTime(5000)
+    })
+    act(() => {
+      vi.advanceTimersByTime(250)
     })
 
     // Success should be gone, error should persist
@@ -102,6 +114,7 @@ describe('Toast Notification System', () => {
     const closeBtn = screen.getByRole('button', { name: /close notification/i })
     act(() => {
       closeBtn.click()
+      vi.advanceTimersByTime(250)
     })
 
     expect(screen.queryByText('Warning message')).not.toBeInTheDocument()
@@ -123,10 +136,368 @@ describe('Toast Notification System', () => {
     })
     expect(screen.getByText('Custom duration')).toBeInTheDocument()
 
-    // Advance another 500ms -> should be dismissed
+    // Advance another 500ms -> should be dismissed after its exit animation
     act(() => {
       vi.advanceTimersByTime(500)
     })
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
     expect(screen.queryByText('Custom duration')).not.toBeInTheDocument()
+  })
+
+  it('triggers undo action when Undo button is clicked', () => {
+    const undoSpy = vi.fn()
+    function UndoTrigger() {
+      const { addToast } = useToast()
+      return (
+        <button onClick={() => addToast('Undoable action done', 'info', 5000, undoSpy, 'Undo Now')}>
+          Trigger Undo
+        </button>
+      )
+    }
+
+    render(
+      <EnvironmentProvider>
+        <LocaleProvider>
+          <MemoryRouter initialEntries={['/']}>
+            <CookieConsentProvider>
+              <Routes>
+                <Route path="/" element={<Layout />}>
+                  <Route index element={<UndoTrigger />} />
+                </Route>
+              </Routes>
+            </CookieConsentProvider>
+          </MemoryRouter>
+        </LocaleProvider>
+      </EnvironmentProvider>
+    )
+
+    // Trigger toast
+    act(() => {
+      screen.getByRole('button', { name: /trigger undo/i }).click()
+    })
+
+    const undoBtn = screen.getByRole('button', { name: /undo now/i })
+    expect(undoBtn).toBeInTheDocument()
+
+    // Click Undo
+    act(() => {
+      undoBtn.click()
+      vi.advanceTimersByTime(250)
+    })
+
+    expect(undoSpy).toHaveBeenCalledTimes(1)
+    // The toast should be dismissed after clicking Undo
+    expect(screen.queryByText('Undoable action done')).not.toBeInTheDocument()
+  })
+
+  it('extends/pauses its timer on hover and focus', () => {
+    renderSystem()
+
+    // Trigger success toast (duration is 5000ms)
+    act(() => {
+      screen.getByRole('button', { name: /trigger success/i }).click()
+    })
+
+    const toastText = screen.getByText('Success message')
+    const toastEl = toastText.closest('.toast')
+    expect(toastEl).toBeInTheDocument()
+
+    // Move time forward slightly
+    act(() => {
+      vi.advanceTimersByTime(2000)
+    })
+    expect(screen.getByText('Success message')).toBeInTheDocument()
+
+    // Hover mouse over the toast to pause
+    act(() => {
+      if (toastEl) fireEvent.mouseEnter(toastEl)
+    })
+
+    // Advance timers by 4000ms (total elapsed would be 6000ms, which is > 5000ms)
+    act(() => {
+      vi.advanceTimersByTime(4000)
+    })
+
+    // It should still be visible because it's paused!
+    expect(screen.getByText('Success message')).toBeInTheDocument()
+
+    // Mouse leave to resume
+    act(() => {
+      if (toastEl) fireEvent.mouseLeave(toastEl)
+    })
+
+    // Advance 1000ms -> should still be there (need 3000ms more since we spent 2000ms initially)
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+    expect(screen.getByText('Success message')).toBeInTheDocument()
+
+    // Advance another 2000ms -> should now be dismissed after its exit animation
+    act(() => {
+      vi.advanceTimersByTime(2000)
+    })
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(screen.queryByText('Success message')).not.toBeInTheDocument()
+  })
+
+  it('pauses its timer on focus and resumes on blur', () => {
+    renderSystem()
+
+    act(() => {
+      screen.getByRole('button', { name: /trigger success/i }).click()
+    })
+
+    const toastText = screen.getByText('Success message')
+    const toastEl = toastText.closest('.toast')
+    expect(toastEl).toBeInTheDocument()
+
+    // Focus the close button to pause
+    const closeBtn = screen.getByRole('button', { name: /close notification/i })
+    act(() => {
+      closeBtn.focus()
+    })
+
+    // Advance timers by 6000ms
+    act(() => {
+      vi.advanceTimersByTime(6000)
+    })
+
+    // It should still be visible!
+    expect(screen.getByText('Success message')).toBeInTheDocument()
+
+    // Blur to resume
+    act(() => {
+      closeBtn.blur()
+    })
+
+    // Advance 5000ms -> should now be dismissed after its exit animation
+    act(() => {
+      vi.advanceTimersByTime(5000)
+    })
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+    expect(screen.queryByText('Success message')).not.toBeInTheDocument()
+  })
+
+  it('dismisses only the topmost toast when Escape is pressed on the container', () => {
+    renderSystem()
+
+    // Trigger two toasts (one success, one warning). The success toast will
+    // be appended first, then the warning. With the new scoped handler,
+    // pressing Escape once removes only the most recent (warning), and the
+    // older success toast remains until the next press.
+    act(() => {
+      screen.getByRole('button', { name: /trigger success/i }).click()
+      screen.getByRole('button', { name: /trigger warning/i }).click()
+    })
+    expect(screen.getByText('Warning message')).toBeInTheDocument()
+    expect(screen.getByText('Success message')).toBeInTheDocument()
+
+    act(() => {
+      const container = document.querySelector('.toast-container') as HTMLElement
+      container.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+
+    expect(screen.queryByText('Warning message')).not.toBeInTheDocument()
+    expect(screen.getByText('Success message')).toBeInTheDocument()
+
+    // A second Escape press removes the remaining toast.
+    act(() => {
+      const container = document.querySelector('.toast-container') as HTMLElement
+      container.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    expect(screen.queryByText('Success message')).not.toBeInTheDocument()
+  })
+
+  it('attaches aria-keyshortcuts="Escape" to the close button', () => {
+    renderSystem()
+
+    act(() => {
+      screen.getByRole('button', { name: /trigger success/i }).click()
+    })
+
+    const closeBtn = screen.getByRole('button', { name: /close notification/i })
+    expect(closeBtn).toHaveAttribute('aria-keyshortcuts', 'Escape')
+  })
+
+  it('keeps addToast referentially stable while toast state changes', () => {
+    const identities: unknown[] = []
+    let renders = 0
+
+    function Consumer() {
+      const { addToast, toasts, removeToast } = useToast()
+      identities.push(addToast)
+      renders += 1
+
+      return (
+        <div>
+          <button onClick={() => addToast('Stable toast', 'info')}>Add toast</button>
+          <button onClick={() => toasts[0] && removeToast(toasts[0].id)}>Remove toast</button>
+        </div>
+      )
+    }
+
+    render(
+      <ToastProvider>
+        <Consumer />
+      </ToastProvider>,
+    )
+
+    const initialAddToast = identities[0]
+
+    act(() => {
+      screen.getByRole('button', { name: 'Add toast' }).click()
+    })
+    act(() => {
+      screen.getByRole('button', { name: 'Add toast' }).click()
+    })
+    act(() => {
+      screen.getByRole('button', { name: 'Remove toast' }).click()
+    })
+
+    expect(renders).toBeGreaterThan(1)
+    expect(identities.every((identity) => identity === initialAddToast)).toBe(true)
+  })
+})
+
+describe('Toast Motion', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const renderSystem = () => {
+    return render(
+      <EnvironmentProvider>
+        <LocaleProvider>
+          <MemoryRouter initialEntries={['/']}>
+            <CookieConsentProvider>
+              <Routes>
+                <Route path="/" element={<Layout />}>
+                  <Route index element={<TestTrigger />} />
+                </Route>
+              </Routes>
+            </CookieConsentProvider>
+          </MemoryRouter>
+        </LocaleProvider>
+      </EnvironmentProvider>
+    )
+  }
+
+  it('applies toast-entering class on mount', () => {
+    renderSystem()
+
+    act(() => {
+      screen.getByRole('button', { name: /trigger success/i }).click()
+    })
+
+    const toastEl = screen.getByText('Success message').closest('.toast')
+    expect(toastEl).toHaveClass('toast-entering')
+  })
+
+  it('transitions from toast-entering to idle after animation completes', () => {
+    renderSystem()
+
+    act(() => {
+      screen.getByRole('button', { name: /trigger success/i }).click()
+    })
+
+    const toastEl = screen.getByText('Success message').closest('.toast')
+    expect(toastEl).toHaveClass('toast-entering')
+
+    // Advance past enter animation (280ms)
+    act(() => {
+      vi.advanceTimersByTime(350)
+    })
+
+    const toastElAfter = screen.getByText('Success message').closest('.toast')
+    expect(toastElAfter).not.toHaveClass('toast-entering')
+    expect(toastElAfter).not.toHaveClass('toast-exiting')
+  })
+
+  it('applies toast-exiting class when dismiss is triggered', () => {
+    renderSystem()
+
+    act(() => {
+      screen.getByRole('button', { name: /trigger success/i }).click()
+    })
+
+    // Advance past enter animation
+    act(() => {
+      vi.advanceTimersByTime(350)
+    })
+
+    // Click close button
+    const closeBtn = screen.getByRole('button', { name: /close notification/i })
+    act(() => {
+      closeBtn.click()
+    })
+
+    // Should have exiting class briefly (within 200ms before removal)
+    // After 200ms the toast is removed from DOM
+    act(() => {
+      vi.advanceTimersByTime(250)
+    })
+
+    // Toast should be fully removed
+    expect(screen.queryByText('Success message')).not.toBeInTheDocument()
+  })
+
+  it('toast container renders with correct aria attributes', () => {
+    renderSystem()
+
+    act(() => {
+      screen.getByRole('button', { name: /trigger success/i }).click()
+    })
+
+    const container = document.querySelector('.toast-container')
+    expect(container).toHaveAttribute('aria-live', 'polite')
+    expect(container).toHaveAttribute('aria-atomic', 'false')
+  })
+
+  it('warning and error toasts use alert role', () => {
+    renderSystem()
+
+    act(() => {
+      screen.getByRole('button', { name: /trigger warning/i }).click()
+      screen.getByRole('button', { name: /trigger error/i }).click()
+    })
+
+    const warningToast = screen.getByText('Warning message').closest('.toast')
+    const errorToast = screen.getByText('Error message').closest('.toast')
+
+    expect(warningToast).toHaveAttribute('role', 'alert')
+    expect(errorToast).toHaveAttribute('role', 'alert')
+  })
+
+  it('shows progress bar for auto-dismissing toasts', () => {
+    renderSystem()
+
+    act(() => {
+      screen.getByRole('button', { name: /trigger success/i }).click()
+    })
+
+    const progressBar = document.querySelector('.toast-progress-bar')
+    expect(progressBar).toBeInTheDocument()
+    expect(progressBar).toHaveAttribute('aria-hidden', 'true')
+  })
+
+  it('does not show progress bar for persistent toasts', () => {
+    renderSystem()
+
+    act(() => {
+      screen.getByRole('button', { name: /trigger warning/i }).click()
+    })
+
+    const progressBar = document.querySelector('.toast-progress-bar')
+    expect(progressBar).not.toBeInTheDocument()
   })
 })

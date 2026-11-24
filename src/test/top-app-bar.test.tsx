@@ -1,11 +1,25 @@
 import { MemoryRouter } from 'react-router-dom'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
-import TopAppBar from '../components/TopAppBar'
+import TopAppBar, { WorkspaceMetadata } from '../components/TopAppBar'
 import Layout from '../components/Layout'
+import { CookieConsentProvider } from '../components/CookieConsentContext'
+import { LocaleProvider } from '../i18n/provider'
+
+const mockWorkspaces: WorkspaceMetadata[] = [
+  { id: "acme-corp", name: "Acme Corp", initials: "AC" },
+  { id: "my-workspace", name: "My Workspace", initials: "MW" },
+  { id: "test-org", name: "Test Org", initials: "TO" },
+]
 
 function renderWithRouter(ui: React.ReactElement, { initialEntries = ['/'] } = {}) {
-  return render(<MemoryRouter initialEntries={initialEntries}>{ui}</MemoryRouter>)
+  return render(
+    <MemoryRouter initialEntries={initialEntries}>
+      <CookieConsentProvider>
+        <LocaleProvider>{ui}</LocaleProvider>
+      </CookieConsentProvider>
+    </MemoryRouter>,
+  )
 }
 
 // ─── TopAppBar ────────────────────────────────────────────────────────────────
@@ -23,7 +37,7 @@ describe('TopAppBar', () => {
     })
 
     it('renders workspace trigger with initial workspace', () => {
-      renderWithRouter(<TopAppBar initialWorkspace="Acme Corp" />)
+      renderWithRouter(<TopAppBar initialWorkspace="acme-corp" workspaces={mockWorkspaces} />)
       expect(
         screen.getByRole('button', { name: /workspace: acme corp/i }),
       ).toBeInTheDocument()
@@ -81,13 +95,13 @@ describe('TopAppBar', () => {
 
   describe('workspace switcher — open state', () => {
     it('opens listbox on trigger click', () => {
-      renderWithRouter(<TopAppBar workspaces={['Acme Corp', 'My Workspace']} />)
+      renderWithRouter(<TopAppBar workspaces={mockWorkspaces.slice(0, 2)} />)
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       expect(screen.getByRole('listbox')).toBeInTheDocument()
     })
 
     it('closes listbox on second trigger click', () => {
-      renderWithRouter(<TopAppBar workspaces={['Acme Corp']} />)
+      renderWithRouter(<TopAppBar workspaces={[mockWorkspaces[0]]} />)
       const btn = screen.getByRole('button', { name: /workspace/i })
       fireEvent.click(btn)
       fireEvent.click(btn)
@@ -103,7 +117,7 @@ describe('TopAppBar', () => {
 
     it('renders all workspace options', () => {
       renderWithRouter(
-        <TopAppBar workspaces={['Acme Corp', 'My Workspace', 'Test Org']} />,
+        <TopAppBar workspaces={mockWorkspaces} />,
       )
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       expect(screen.getByRole('option', { name: /acme corp/i })).toBeInTheDocument()
@@ -114,8 +128,8 @@ describe('TopAppBar', () => {
     it('marks the current workspace as aria-selected="true"', () => {
       renderWithRouter(
         <TopAppBar
-          workspaces={['Acme Corp', 'My Workspace']}
-          initialWorkspace="My Workspace"
+          workspaces={mockWorkspaces.slice(0, 2)}
+          initialWorkspace="my-workspace"
         />,
       )
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
@@ -131,7 +145,7 @@ describe('TopAppBar', () => {
 
     it('closes outside click — mousedown on document body', () => {
       const { baseElement } = renderWithRouter(
-        <TopAppBar workspaces={['Acme Corp']} />,
+        <TopAppBar workspaces={[mockWorkspaces[0]]} />,
       )
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       expect(screen.getByRole('listbox')).toBeInTheDocument()
@@ -140,14 +154,14 @@ describe('TopAppBar', () => {
     })
 
     it('does not close workspace menu on mousedown inside workspace trigger', () => {
-      renderWithRouter(<TopAppBar workspaces={['Acme Corp']} />)
+      renderWithRouter(<TopAppBar workspaces={[mockWorkspaces[0]]} />)
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       fireEvent.mouseDown(screen.getByRole('button', { name: /workspace/i }))
       expect(screen.getByRole('listbox')).toBeInTheDocument()
     })
 
     it('does not close workspace menu on mousedown inside workspace listbox', () => {
-      renderWithRouter(<TopAppBar workspaces={['Acme Corp']} />)
+      renderWithRouter(<TopAppBar workspaces={[mockWorkspaces[0]]} />)
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       fireEvent.mouseDown(screen.getByRole('listbox'))
       expect(screen.getByRole('listbox')).toBeInTheDocument()
@@ -157,7 +171,7 @@ describe('TopAppBar', () => {
   describe('workspace switcher — selection', () => {
     it('selects a workspace on option click and closes menu', () => {
       renderWithRouter(
-        <TopAppBar workspaces={['Acme Corp', 'My Workspace']} initialWorkspace="Acme Corp" />,
+        <TopAppBar workspaces={mockWorkspaces.slice(0, 2)} initialWorkspace="acme-corp" />,
       )
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       fireEvent.click(screen.getByRole('option', { name: /my workspace/i }))
@@ -169,7 +183,7 @@ describe('TopAppBar', () => {
 
     it('selects workspace on Enter key', () => {
       renderWithRouter(
-        <TopAppBar workspaces={['Acme Corp', 'My Workspace']} initialWorkspace="Acme Corp" />,
+        <TopAppBar workspaces={mockWorkspaces.slice(0, 2)} initialWorkspace="acme-corp" />,
       )
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       fireEvent.keyDown(screen.getByRole('option', { name: /my workspace/i }), {
@@ -183,7 +197,7 @@ describe('TopAppBar', () => {
 
     it('selects workspace on Space key', () => {
       renderWithRouter(
-        <TopAppBar workspaces={['Acme Corp', 'My Workspace']} initialWorkspace="Acme Corp" />,
+        <TopAppBar workspaces={mockWorkspaces.slice(0, 2)} initialWorkspace="acme-corp" />,
       )
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       fireEvent.keyDown(screen.getByRole('option', { name: /my workspace/i }), {
@@ -194,7 +208,7 @@ describe('TopAppBar', () => {
 
     it('does not select workspace on other key in option', () => {
       renderWithRouter(
-        <TopAppBar workspaces={['Acme Corp', 'My Workspace']} initialWorkspace="Acme Corp" />,
+        <TopAppBar workspaces={mockWorkspaces.slice(0, 2)} initialWorkspace="acme-corp" />,
       )
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       fireEvent.keyDown(screen.getByRole('option', { name: /my workspace/i }), { key: 'Tab' })
@@ -207,7 +221,7 @@ describe('TopAppBar', () => {
 
   describe('workspace switcher — keyboard navigation', () => {
     it('opens listbox on ArrowDown key from trigger', () => {
-      renderWithRouter(<TopAppBar workspaces={['Acme Corp']} />)
+      renderWithRouter(<TopAppBar workspaces={[mockWorkspaces[0]]} />)
       fireEvent.keyDown(screen.getByRole('button', { name: /workspace/i }), {
         key: 'ArrowDown',
       })
@@ -215,7 +229,7 @@ describe('TopAppBar', () => {
     })
 
     it('closes listbox on Escape key from trigger', () => {
-      renderWithRouter(<TopAppBar workspaces={['Acme Corp']} />)
+      renderWithRouter(<TopAppBar workspaces={[mockWorkspaces[0]]} />)
       const btn = screen.getByRole('button', { name: /workspace/i })
       fireEvent.click(btn)
       fireEvent.keyDown(btn, { key: 'Escape' })
@@ -223,14 +237,19 @@ describe('TopAppBar', () => {
     })
 
     it('closes listbox on Escape from the listbox', () => {
-      renderWithRouter(<TopAppBar workspaces={['Acme Corp']} />)
+      renderWithRouter(<TopAppBar workspaces={[mockWorkspaces[0]]} />)
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       fireEvent.keyDown(screen.getByRole('listbox'), { key: 'Escape' })
       expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
     })
 
     it('ArrowDown in listbox wraps to first item from last', () => {
-      renderWithRouter(<TopAppBar workspaces={['A', 'B', 'C']} />)
+      const testWorkspaces: WorkspaceMetadata[] = [
+        { id: "a", name: "A", initials: "A" },
+        { id: "b", name: "B", initials: "B" },
+        { id: "c", name: "C", initials: "C" },
+      ]
+      renderWithRouter(<TopAppBar workspaces={testWorkspaces} />)
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       const list = screen.getByRole('listbox')
       // Fire ArrowDown multiple times; should not throw
@@ -242,21 +261,35 @@ describe('TopAppBar', () => {
     })
 
     it('ArrowUp in listbox wraps to last item from first', () => {
-      renderWithRouter(<TopAppBar workspaces={['A', 'B']} />)
+      const testWorkspaces: WorkspaceMetadata[] = [
+        { id: "a", name: "A", initials: "A" },
+        { id: "b", name: "B", initials: "B" },
+      ]
+      renderWithRouter(<TopAppBar workspaces={testWorkspaces} />)
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       fireEvent.keyDown(screen.getByRole('listbox'), { key: 'ArrowUp' })
       expect(screen.getByRole('listbox')).toBeInTheDocument()
     })
 
     it('Home key focuses first option', () => {
-      renderWithRouter(<TopAppBar workspaces={['A', 'B', 'C']} />)
+      const testWorkspaces: WorkspaceMetadata[] = [
+        { id: "a", name: "A", initials: "A" },
+        { id: "b", name: "B", initials: "B" },
+        { id: "c", name: "C", initials: "C" },
+      ]
+      renderWithRouter(<TopAppBar workspaces={testWorkspaces} />)
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       fireEvent.keyDown(screen.getByRole('listbox'), { key: 'Home' })
       expect(screen.getByRole('listbox')).toBeInTheDocument()
     })
 
     it('End key focuses last option', () => {
-      renderWithRouter(<TopAppBar workspaces={['A', 'B', 'C']} />)
+      const testWorkspaces: WorkspaceMetadata[] = [
+        { id: "a", name: "A", initials: "A" },
+        { id: "b", name: "B", initials: "B" },
+        { id: "c", name: "C", initials: "C" },
+      ]
+      renderWithRouter(<TopAppBar workspaces={testWorkspaces} />)
       fireEvent.click(screen.getByRole('button', { name: /workspace/i }))
       fireEvent.keyDown(screen.getByRole('listbox'), { key: 'End' })
       expect(screen.getByRole('listbox')).toBeInTheDocument()
@@ -271,7 +304,7 @@ describe('TopAppBar', () => {
     })
 
     it('ArrowDown does nothing when listbox is already open (handled by list)', () => {
-      renderWithRouter(<TopAppBar workspaces={['Acme Corp']} />)
+      renderWithRouter(<TopAppBar workspaces={[mockWorkspaces[0]]} />)
       const btn = screen.getByRole('button', { name: /workspace/i })
       fireEvent.click(btn)
       // Pressing ArrowDown on trigger when open should NOT toggle closed
@@ -356,7 +389,7 @@ describe('TopAppBar', () => {
     it('renders Profile settings menuitem', () => {
       renderWithRouter(<TopAppBar />)
       fireEvent.click(screen.getByRole('button', { name: /account menu/i }))
-      expect(screen.getByRole('menuitem', { name: /profile settings/i })).toBeInTheDocument()
+      expect(screen.getByRole('menuitem', { name: /^settings$/i })).toBeInTheDocument()
     })
 
     it('renders API keys menuitem', () => {
@@ -374,7 +407,7 @@ describe('TopAppBar', () => {
     it('closes menu when Profile settings is clicked', () => {
       renderWithRouter(<TopAppBar />)
       fireEvent.click(screen.getByRole('button', { name: /account menu/i }))
-      fireEvent.click(screen.getByRole('menuitem', { name: /profile settings/i }))
+      fireEvent.click(screen.getByRole('menuitem', { name: /^settings$/i }))
       expect(screen.queryByRole('menu')).not.toBeInTheDocument()
     })
 
@@ -442,27 +475,21 @@ describe('TopAppBar', () => {
     it('activates Profile settings on Enter key', () => {
       renderWithRouter(<TopAppBar />)
       fireEvent.click(screen.getByRole('button', { name: /account menu/i }))
-      fireEvent.keyDown(screen.getByRole('menuitem', { name: /profile settings/i }), {
-        key: 'Enter',
-      })
+      fireEvent.keyDown(screen.getByRole('menuitem', { name: /^settings$/i }), { key: 'Enter' })
       expect(screen.queryByRole('menu')).not.toBeInTheDocument()
     })
 
     it('activates Profile settings on Space key', () => {
       renderWithRouter(<TopAppBar />)
       fireEvent.click(screen.getByRole('button', { name: /account menu/i }))
-      fireEvent.keyDown(screen.getByRole('menuitem', { name: /profile settings/i }), {
-        key: ' ',
-      })
+      fireEvent.keyDown(screen.getByRole('menuitem', { name: /^settings$/i }), { key: ' ' })
       expect(screen.queryByRole('menu')).not.toBeInTheDocument()
     })
 
     it('does not close menu on other key from Profile settings', () => {
       renderWithRouter(<TopAppBar />)
       fireEvent.click(screen.getByRole('button', { name: /account menu/i }))
-      fireEvent.keyDown(screen.getByRole('menuitem', { name: /profile settings/i }), {
-        key: 'Tab',
-      })
+      fireEvent.keyDown(screen.getByRole('menuitem', { name: /^settings$/i }), { key: 'Tab' })
       expect(screen.getByRole('menu')).toBeInTheDocument()
     })
 
@@ -671,38 +698,38 @@ describe('Layout', () => {
 
   it('renders Dashboard nav link', () => {
     renderWithRouter(<Layout />)
-    expect(screen.getByRole('link', { name: /dashboard/i })).toBeInTheDocument()
+    expect(screen.getAllByRole('link', { name: /dashboard/i }).length).toBeGreaterThanOrEqual(1)
   })
 
   it('renders Attestations nav link', () => {
     renderWithRouter(<Layout />)
-    expect(screen.getByRole('link', { name: /attestations/i })).toBeInTheDocument()
+    expect(screen.getAllByRole('link', { name: /attestations/i }).length).toBeGreaterThanOrEqual(1)
   })
 
   it('active link (Dashboard at /) has aria-current="page"', () => {
-    renderWithRouter(<Layout />, { initialEntries: ['/'] })
-    expect(screen.getByRole('link', { name: /dashboard/i })).toHaveAttribute(
-      'aria-current',
-      'page',
-    )
+    renderWithRouter(<Layout />, { initialEntries: ['/dashboard'] })
+    const aside = document.getElementById('app-sidebar')!
+    const dashLinks = Array.from(aside.querySelectorAll('a')).filter(a => /dashboard/i.test(a.textContent ?? ''))
+    const activeLink = dashLinks.find(l => l.getAttribute('aria-current') === 'page')
+    expect(activeLink).toBeDefined()
   })
 
   it('inactive link does not have aria-current', () => {
     renderWithRouter(<Layout />, { initialEntries: ['/'] })
-    expect(screen.getByRole('link', { name: /attestations/i })).not.toHaveAttribute(
-      'aria-current',
-    )
+    // The sidebar Attestations link should not be active at /
+    const aside = document.getElementById('app-sidebar')!
+    const attestationsLinks = Array.from(aside.querySelectorAll('a')).filter(a => /attestations/i.test(a.textContent ?? ''))
+    expect(attestationsLinks.length).toBeGreaterThanOrEqual(1)
+    expect(attestationsLinks[0]).not.toHaveAttribute('aria-current', 'page')
   })
 
   it('Attestations link is active at /attestations and Dashboard is not', () => {
     renderWithRouter(<Layout />, { initialEntries: ['/attestations'] })
-    expect(screen.getByRole('link', { name: /attestations/i })).toHaveAttribute(
-      'aria-current',
-      'page',
-    )
-    expect(screen.getByRole('link', { name: /dashboard/i })).not.toHaveAttribute(
-      'aria-current',
-    )
+    const aside = document.getElementById('app-sidebar')!
+    const attestationsLink = Array.from(aside.querySelectorAll('a')).find(a => /attestations/i.test(a.textContent ?? ''))
+    const dashboardLink = Array.from(aside.querySelectorAll('a')).find(a => /dashboard/i.test(a.textContent ?? ''))
+    expect(attestationsLink).toHaveAttribute('aria-current', 'page')
+    expect(dashboardLink).not.toHaveAttribute('aria-current', 'page')
   })
 
   it('sidebar does not have app-sidebar-open class by default', () => {

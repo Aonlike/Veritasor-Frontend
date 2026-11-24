@@ -1,16 +1,33 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useState } from 'react'
 import {
   Link,
   Outlet,
   useLocation,
   useNavigate,
   useOutletContext,
+  useSearchParams,
 } from 'react-router-dom'
 import WizardProgress from '../../components/WizardProgress'
+import { useToast } from '../../components/ToastContext'
+import { sourcesStore, generateSourceId } from '../../store/sourcesStore'
+import {
+  ConnectSourceProvider,
+  useConnectSource,
+  type InternalCategory,
+  type LedgerAccount,
+  type OAuthCallbackState,
+  type ProviderId,
+  type SyncWindowId,
+  type WizardData,
+} from './ConnectSourceContext'
+import { track } from '../../analytics'
 
-type ProviderId = 'stripe' | 'shopify' | 'razorpay'
-type AuthorizationStatus = 'idle' | 'pending' | 'authorized' | 'denied'
-type SyncWindowId = 'trailing-12-months' | 'current-fiscal-year' | 'all-history'
+export {
+  ConnectSourceContext,
+  ConnectSourceProvider,
+  CONNECT_SOURCE_STORAGE_KEY,
+  useConnectSource,
+} from './ConnectSourceContext'
 
 type ProviderDefinition = {
   id: ProviderId
@@ -33,25 +50,23 @@ type WizardStep = {
   detail: string
 }
 
-type WizardData = {
-  provider: ProviderId | null
-  authorizationStatus: AuthorizationStatus
-  syncWindow: SyncWindowId | null
-  optionalScopes: string[]
-  confirmLeastPrivilege: boolean
-  scopeValidationAttempted: boolean
-}
-
 type WizardContext = {
   data: WizardData
   currentStepIndex: number
   providerName: string
   setProvider: (provider: ProviderId) => void
-  startAuthorization: () => void
+  startAuthorization: () => string
   setAuthorizationDenied: () => void
+  setOAuthCallbackState: (
+    state: OAuthCallbackState,
+    errorDetails?: { error?: string | null; errorDescription?: string | null },
+  ) => void
   setSyncWindow: (windowId: SyncWindowId) => void
   toggleOptionalScope: (scopeId: string) => void
+  setCurrencyMapping: (currency: string, field: 'category' | 'ledgerAccount', value: string) => void
   setConfirmLeastPrivilege: (checked: boolean) => void
+  runTestConnection: () => void
+  resetTestConnection: () => void
 }
 
 const providerOptions: ProviderDefinition[] = [
@@ -129,10 +144,22 @@ const wizardSteps: WizardStep[] = [
     detail: 'Complete the secure provider handoff.',
   },
   {
+    id: 'callback',
+    path: '/connect-source/callback',
+    label: 'OAuth callback',
+    detail: 'Review authorization feedback and scope permissions.',
+  },
+  {
     id: 'scope',
     path: '/connect-source/scope',
     label: 'Configure scope',
     detail: 'Decide how much history and supporting context to sync.',
+  },
+  {
+    id: 'mapping',
+    path: '/connect-source/mapping',
+    label: 'Map currencies',
+    detail: 'Assign internal categories and ledger accounts to source currencies.',
   },
   {
     id: 'confirm',
@@ -142,14 +169,21 @@ const wizardSteps: WizardStep[] = [
   },
 ]
 
-const initialWizardData: WizardData = {
-  provider: null,
-  authorizationStatus: 'idle',
-  syncWindow: null,
-  optionalScopes: [],
-  confirmLeastPrivilege: false,
-  scopeValidationAttempted: false,
-}
+const CATEGORY_OPTIONS: { value: InternalCategory; label: string }[] = [
+  { value: 'recurring', label: 'Recurring' },
+  { value: 'one-time', label: 'One-time' },
+  { value: 'refund', label: 'Refund' },
+  { value: 'fee', label: 'Fee' },
+  { value: 'other', label: 'Other' },
+]
+
+const LEDGER_OPTIONS: { value: LedgerAccount; label: string }[] = [
+  { value: 'revenue', label: 'Revenue' },
+  { value: 'deferred', label: 'Deferred revenue' },
+  { value: 'contra', label: 'Contra revenue' },
+  { value: 'expense', label: 'Expense' },
+  { value: 'unassigned', label: 'Unassigned' },
+]
 
 function getProviderName(provider: ProviderId | null) {
   return providerOptions.find((option) => option.id === provider)?.name ?? 'your provider'
@@ -164,27 +198,44 @@ function isProviderComplete(data: WizardData) {
 }
 
 function isAuthorizeComplete(data: WizardData) {
-  return isProviderComplete(data) && data.authorizationStatus === 'authorized'
+  return isProviderComplete(data) && data.authorizationStatus !== 'idle' && data.authorizationStatus !== 'pending'
+}
+
+function canAccessCallbackStep(data: WizardData) {
+  return (
+    isProviderComplete(data) &&
+    (isAuthorizeComplete(data) ||
+      data.authorizationStatus === 'pending' ||
+      data.oauthStateNonce !== null)
+  )
+}
+
+function isCallbackComplete(data: WizardData) {
+  return (
+    isAuthorizeComplete(data) &&
+    data.authorizationStatus === 'authorized' &&
+    data.oauthCallbackState === 'success'
+  )
 }
 
 function isScopeComplete(data: WizardData) {
-  return isAuthorizeComplete(data) && data.syncWindow !== null
+  return isCallbackComplete(data) && data.syncWindow !== null
+}
+
+function isMappingComplete(data: WizardData) {
+  return (
+    isScopeComplete(data) &&
+    data.currencyMappings.every((row) => row.category !== null && row.ledgerAccount !== null)
+  )
 }
 
 function getFirstIncompleteStepIndex(data: WizardData) {
-  if (!isProviderComplete(data)) {
-    return 0
-  }
-
-  if (!isAuthorizeComplete(data)) {
-    return 1
-  }
-
-  if (!isScopeComplete(data)) {
-    return 2
-  }
-
-  return 3
+  if (!isProviderComplete(data)) return 0
+  if (!isAuthorizeComplete(data)) return 1
+  if (!isCallbackComplete(data)) return 2
+  if (!isScopeComplete(data)) return 3
+  if (!isMappingComplete(data)) return 4
+  return 5
 }
 
 function useWizardContext() {
@@ -192,15 +243,41 @@ function useWizardContext() {
 }
 
 export function ConnectSourceWizard() {
+  return (
+    <ConnectSourceProvider>
+      <ConnectSourceWizardShell />
+    </ConnectSourceProvider>
+  )
+}
+
+function ConnectSourceWizardShell() {
   const location = useLocation()
   const navigate = useNavigate()
-  const [data, setData] = useState<WizardData>(initialWizardData)
+  const { addToast } = useToast()
+  const {
+    data,
+    setData,
+    setProvider,
+    startAuthorization,
+    setOAuthCallbackState,
+    setSyncWindow,
+    toggleOptionalScope,
+    setCurrencyMapping,
+    setConfirmLeastPrivilege,
+    resetWizard,
+  } = useConnectSource()
   const currentStepIndex = getStepIndex(location.pathname)
   const providerName = getProviderName(data.provider)
 
   useEffect(() => {
     if (currentStepIndex === -1) {
       navigate(wizardSteps[0].path, { replace: true })
+      return
+    }
+
+    // Allow landing on /connect-source/callback when returning from an OAuth redirect
+    // (provider is selected and authorization is pending or a state nonce is stored).
+    if (currentStepIndex === 2 && canAccessCallbackStep(data)) {
       return
     }
 
@@ -212,19 +289,23 @@ export function ConnectSourceWizard() {
   }, [currentStepIndex, data, navigate])
 
   useEffect(() => {
-    if (data.authorizationStatus !== 'pending') {
+    if (data.authorizationStatus !== 'pending' || currentStepIndex !== 1) {
       return
     }
 
+    const nonce = data.oauthStateNonce
     const timeoutId = window.setTimeout(() => {
       setData((currentData) => ({
         ...currentData,
         authorizationStatus: 'authorized',
+        oauthCallbackState: 'success',
       }))
+      const query = nonce ? `?state=${encodeURIComponent(nonce)}` : '?state=success'
+      navigate(`/connect-source/callback${query}`)
     }, 900)
 
     return () => window.clearTimeout(timeoutId)
-  }, [data.authorizationStatus])
+  }, [data.authorizationStatus, data.oauthStateNonce, currentStepIndex, navigate, setData])
 
   useEffect(() => {
     const activeStep = wizardSteps[currentStepIndex]
@@ -235,6 +316,50 @@ export function ConnectSourceWizard() {
 
     document.title = `${activeStep.label} | Connect source | Veritasor`
   }, [currentStepIndex])
+
+  const setAuthorizationDenied = useCallback(() => {
+    setOAuthCallbackState('denied', {
+      error: 'access_denied',
+      errorDescription: 'The user declined the authorization request.',
+    })
+    navigate('/connect-source/callback?error=access_denied')
+  }, [navigate, setOAuthCallbackState])
+
+  const runTestConnection = useCallback(() => {}, [])
+  const resetTestConnection = useCallback(() => {}, [])
+
+  const context = useMemo<WizardContext>(
+    () => ({
+      data,
+      currentStepIndex,
+      providerName,
+      setProvider,
+      startAuthorization,
+      setAuthorizationDenied,
+      setOAuthCallbackState,
+      setSyncWindow,
+      toggleOptionalScope,
+      setCurrencyMapping,
+      setConfirmLeastPrivilege,
+      runTestConnection,
+      resetTestConnection,
+    }),
+    [
+      data,
+      currentStepIndex,
+      providerName,
+      setProvider,
+      startAuthorization,
+      setAuthorizationDenied,
+      setOAuthCallbackState,
+      setSyncWindow,
+      toggleOptionalScope,
+      setCurrencyMapping,
+      setConfirmLeastPrivilege,
+      runTestConnection,
+      resetTestConnection,
+    ],
+  )
 
   if (currentStepIndex === -1) {
     return null
@@ -249,9 +374,11 @@ export function ConnectSourceWizard() {
       ? !isProviderComplete(data)
       : activeStep.id === 'authorize'
         ? data.authorizationStatus !== 'authorized'
-        : activeStep.id === 'confirm'
-          ? !data.confirmLeastPrivilege
-          : false
+        : activeStep.id === 'callback'
+          ? data.oauthCallbackState !== 'success'
+          : activeStep.id === 'confirm'
+            ? !data.confirmLeastPrivilege
+            : false
 
   function goToStep(index: number) {
     navigate(wizardSteps[index].path)
@@ -266,57 +393,42 @@ export function ConnectSourceWizard() {
       return
     }
 
+    if (activeStep.id === 'mapping') {
+      const hasUnmapped = data.currencyMappings.some(
+        (row) => row.category === null || row.ledgerAccount === null,
+      )
+      if (hasUnmapped) {
+        setData((currentData) => ({
+          ...currentData,
+          mappingValidationAttempted: true,
+        }))
+        return
+      }
+    }
+
     if (isLastStep) {
-      navigate('/')
+      // Build a new Source from wizard data and add it to the shared store
+      const providerName = getProviderName(data.provider)
+      const newSource = {
+        id: generateSourceId(),
+        provider: providerName,
+        accountLabel: `${providerName.toLowerCase()}-connected`,
+        status: 'healthy' as const,
+        lastSync: new Date().toISOString(),
+      }
+      sourcesStore.add(newSource)
+      resetWizard()
+      track('source_connected', {
+        provider: data.provider,
+        syncWindow: data.syncWindow,
+        optionalScopesCount: data.optionalScopes.length,
+      })
+      addToast(`${providerName} connected successfully`, 'success')
+      navigate('/sources')
       return
     }
 
     goToStep(currentStepIndex + 1)
-  }
-
-  const context: WizardContext = {
-    data,
-    currentStepIndex,
-    providerName,
-    setProvider: (provider) =>
-      setData({
-        provider,
-        authorizationStatus: 'idle',
-        syncWindow: null,
-        optionalScopes: [],
-        confirmLeastPrivilege: false,
-        scopeValidationAttempted: false,
-      }),
-    startAuthorization: () =>
-      setData((currentData) => ({
-        ...currentData,
-        authorizationStatus: 'pending',
-      })),
-    setAuthorizationDenied: () =>
-      setData((currentData) => ({
-        ...currentData,
-        authorizationStatus: 'denied',
-      })),
-    setSyncWindow: (windowId) =>
-      setData((currentData) => ({
-        ...currentData,
-        syncWindow: windowId,
-        scopeValidationAttempted: false,
-        confirmLeastPrivilege: false,
-      })),
-    toggleOptionalScope: (scopeId) =>
-      setData((currentData) => ({
-        ...currentData,
-        optionalScopes: currentData.optionalScopes.includes(scopeId)
-          ? currentData.optionalScopes.filter((currentScope) => currentScope !== scopeId)
-          : [...currentData.optionalScopes, scopeId],
-        confirmLeastPrivilege: false,
-      })),
-    setConfirmLeastPrivilege: (checked) =>
-      setData((currentData) => ({
-        ...currentData,
-        confirmLeastPrivilege: checked,
-      })),
   }
 
   return (
@@ -330,11 +442,6 @@ export function ConnectSourceWizard() {
               The wizard keeps sensitive setup linear: pick a provider, complete the secure
               handoff, set the sync scope, then confirm the read-only connection.
             </p>
-          </div>
-          <div className="page-chip-group" aria-label="Wizard characteristics">
-            <span className="page-chip">WCAG 2.1 AA target</span>
-            <span className="page-chip">4-step pattern</span>
-            <span className="page-chip">Review-friendly states</span>
           </div>
         </div>
       </header>
@@ -407,6 +514,7 @@ export function SelectSourceProviderStep() {
             const isChecked = data.provider === provider.id
 
             return (
+              // eslint-disable-next-line jsx-a11y/label-has-associated-control -- label wraps radio input and nested provider card text
               <label key={provider.id} className="wizard-choice-card">
                 <input
                   className="wizard-choice-input"
@@ -433,14 +541,57 @@ export function SelectSourceProviderStep() {
   )
 }
 
+export function ProviderLogo({ provider }: { provider: ProviderId | null }) {
+  if (provider === 'stripe') {
+    return (
+      <div className="provider-logo-badge stripe-badge" aria-label="Stripe logo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M13.9 8.6c0-.7.6-1 1.6-1 1.4 0 3.2.5 4.5 1.2V4.5c-1.5-.6-3.1-.9-4.7-.9-3.9 0-6.5 2-6.5 5.2 0 4.9 6.7 4.1 6.7 6.3 0 .8-.7 1.1-1.7 1.1-1.6 0-3.7-.7-5.2-1.5v4.4c1.7.7 3.5 1.1 5.2 1.1 4 0 6.8-2 6.8-5.3-.1-5.3-6.7-4.3-6.7-6.3z" fill="#635BFF"/>
+        </svg>
+        <span>Stripe</span>
+      </div>
+    )
+  }
+  if (provider === 'shopify') {
+    return (
+      <div className="provider-logo-badge shopify-badge" aria-label="Shopify logo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M18.5 4.5L16.2 3s-.3 0-.5.2l-1.3 1.2c-.3-.2-.7-.4-1.2-.5l-.3-1.8c0-.2-.2-.3-.4-.3h-2.1c-.2 0-.4.1-.4.3l-.3 1.8c-.5.1-.9.3-1.2.5L7.2 3.2c-.2-.2-.4-.2-.5-.2L4.4 4.5c-.2.1-.2.4-.1.5l1.4 2.2c-.3.4-.5.9-.6 1.4L3.3 9c-.2.1-.3.3-.3.5v2.6c0 .2.1.4.3.5l1.8.4c.1.5.3 1 .6 1.4L4.3 16.6c-.1.2-.1.4.1.5l2.3 1.5c.2.1.4.1.5-.1l1.3-1.2c.5.3 1 .5 1.5.6l.3 1.8c0 .2.2.3.4.3h2.6c.2 0 .4-.1.4-.3l.3-1.8c.5-.1 1-.3 1.5-.6l1.3 1.2c.1.2.4.2.5.1l2.3-1.5c.2-.1.2-.4.1-.5l-1.4-2.2c.3-.4.5-.9.6-1.4l1.8-.4c.2-.1.3-.3.3-.5V9.5c0-.2-.1-.4-.3-.5l-1.8-.4c-.1-.5-.3-1-.6-1.4l1.4-2.2c.1-.1.1-.4-.1-.5z" fill="#95BF47"/>
+        </svg>
+        <span>Shopify</span>
+      </div>
+    )
+  }
+  if (provider === 'razorpay') {
+    return (
+      <div className="provider-logo-badge razorpay-badge" aria-label="Razorpay logo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M4.5 20.5l4-17h11l-3 4.5-5.5.5-2.5 12z" fill="#0C2340"/>
+          <path d="M12.5 8l-3 12.5h3.5l2.5-12.5z" fill="#0284C7"/>
+        </svg>
+        <span>Razorpay</span>
+      </div>
+    )
+  }
+  return (
+    <div className="provider-logo-badge default-badge" aria-label="Revenue Source logo">
+      <span>{provider || 'Revenue Source'}</span>
+    </div>
+  )
+}
+
 export function AuthorizeSourceStep() {
-  const { data, providerName, startAuthorization, setAuthorizationDenied } = useWizardContext()
+  const { data, providerName, startAuthorization, setAuthorizationDenied, setOAuthCallbackState } = useWizardContext()
+  const navigate = useNavigate()
 
   return (
     <div className="wizard-step-body">
       <div className="wizard-two-column">
         <section className="app-card wizard-inline-card">
-          <h3>Before redirecting to {providerName}</h3>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+            <h3>Before redirecting to {providerName}</h3>
+            <ProviderLogo provider={data.provider} />
+          </div>
           <p className="wizard-supporting-copy">
             The CTA below stands in for an OAuth handoff. The step keeps the main Next button
             disabled until the handoff resolves, so the user cannot skip over authorization.
@@ -450,7 +601,7 @@ export function AuthorizeSourceStep() {
               <li key={scope}>{scope}</li>
             ))}
           </ul>
-          <div className="wizard-inline-actions">
+          <div className="wizard-inline-actions" style={{ flexWrap: 'wrap', gap: '0.5rem' }}>
             <button
               type="button"
               className="app-button app-button-primary"
@@ -468,6 +619,28 @@ export function AuthorizeSourceStep() {
               disabled={data.authorizationStatus === 'pending'}
             >
               Simulate access denied
+            </button>
+            <button
+              type="button"
+              className="app-button app-button-ghost"
+              onClick={() => {
+                setOAuthCallbackState('expired')
+                navigate('/connect-source/callback?state=expired')
+              }}
+              disabled={data.authorizationStatus === 'pending'}
+            >
+              Simulate expired session
+            </button>
+            <button
+              type="button"
+              className="app-button app-button-ghost"
+              onClick={() => {
+                setOAuthCallbackState('unknown')
+                navigate('/connect-source/callback?state=unknown')
+              }}
+              disabled={data.authorizationStatus === 'pending'}
+            >
+              Simulate unknown error
             </button>
           </div>
         </section>
@@ -496,8 +669,302 @@ export function AuthorizeSourceStep() {
               provide a retry path instead of silently dropping them back to the dashboard.
             </p>
           ) : null}
+          {data.authorizationStatus === 'expired' ? (
+            <p className="wizard-status-message wizard-status-message-error" role="alert">
+              Authorization session expired before completion.
+            </p>
+          ) : null}
+          {data.authorizationStatus === 'unknown' ? (
+            <p className="wizard-status-message wizard-status-message-error" role="alert">
+              Unknown OAuth callback response error encountered.
+            </p>
+          ) : null}
+          {data.authorizationStatus === 'mismatch' ? (
+            <p className="wizard-status-message wizard-status-message-error" role="alert">
+              OAuth state verification failed. Start a fresh authorization attempt to continue.
+            </p>
+          ) : null}
         </aside>
       </div>
+    </div>
+  )
+}
+
+export function OAuthCallbackLandingStep() {
+  const { data, providerName, setOAuthCallbackState } = useWizardContext()
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const errorParam = searchParams.get('error')
+  const errorDescriptionParam = searchParams.get('error_description')
+  const stateParam = searchParams.get('state')
+  const statusParam = searchParams.get('status')
+  const storedNonce = data.oauthStateNonce ?? null
+
+  useEffect(() => {
+    // 1. Explicit OAuth error parameter from the provider takes highest precedence
+    if (errorParam) {
+      const lower = errorParam.toLowerCase()
+      const details = {
+        error: errorParam,
+        errorDescription: errorDescriptionParam,
+      }
+      if (lower.includes('denied') || lower.includes('access_denied')) {
+        setOAuthCallbackState('denied', details)
+      } else if (lower.includes('expire') || lower.includes('timeout')) {
+        setOAuthCallbackState('expired', details)
+      } else {
+        setOAuthCallbackState('unknown', details)
+      }
+      return
+    }
+
+    // 2. Validate state parameter against stored anti-CSRF nonce when present
+    if (stateParam) {
+      const lower = stateParam.toLowerCase()
+      if (storedNonce) {
+        if (stateParam === storedNonce) {
+          setOAuthCallbackState('success')
+        } else if (lower === 'denied' || lower === 'access_denied') {
+          setOAuthCallbackState('denied')
+        } else if (lower === 'expired' || lower === 'timeout') {
+          setOAuthCallbackState('expired')
+        } else if (lower === 'unknown') {
+          setOAuthCallbackState('unknown')
+        } else {
+          setOAuthCallbackState('mismatch', {
+            error: 'state_mismatch',
+            errorDescription:
+              'The OAuth state parameter returned by the provider did not match this session.',
+          })
+        }
+        return
+      }
+
+      // No stored nonce (e.g., direct demo links or isolated callback previews)
+      if (lower.includes('denied') || lower.includes('access_denied')) {
+        setOAuthCallbackState('denied')
+      } else if (lower.includes('expire') || lower.includes('timeout')) {
+        setOAuthCallbackState('expired')
+      } else if (lower.includes('unknown') || lower.includes('error') || lower.includes('invalid')) {
+        setOAuthCallbackState('unknown')
+      } else if (lower.includes('success') || lower.includes('authorized')) {
+        setOAuthCallbackState('success')
+      } else {
+        setOAuthCallbackState('mismatch', {
+          error: 'state_mismatch',
+          errorDescription:
+            'No active OAuth session nonce was found to verify the returned state parameter.',
+        })
+      }
+      return
+    }
+
+    // 3. Fallback to status query param
+    if (statusParam) {
+      const lower = statusParam.toLowerCase()
+      if (lower.includes('denied') || lower.includes('access_denied')) {
+        setOAuthCallbackState('denied')
+      } else if (lower.includes('expire') || lower.includes('timeout')) {
+        setOAuthCallbackState('expired')
+      } else if (lower.includes('unknown') || lower.includes('error') || lower.includes('invalid')) {
+        setOAuthCallbackState('unknown')
+      } else if (lower.includes('success') || lower.includes('authorized')) {
+        setOAuthCallbackState('success')
+      }
+    }
+  }, [errorParam, errorDescriptionParam, stateParam, statusParam, storedNonce, setOAuthCallbackState])
+
+  const currentState: OAuthCallbackState = data.oauthCallbackState || 'success'
+
+  const stateDetails: Record<
+    OAuthCallbackState,
+    {
+      badgeClass: string
+      badgeText: string
+      title: string
+      subtitle: string
+      telemetryCode: string
+      telemetryDetail: string
+      refId: string
+      primaryCtaLabel: string
+      primaryCtaAction: () => void
+      secondaryCtaLabel: string
+      secondaryCtaAction: () => void
+      isError: boolean
+    }
+  > = {
+    success: {
+      badgeClass: 'status-success',
+      badgeText: 'Authorization Successful',
+      title: `Connected to ${providerName}`,
+      subtitle: `Verifiable read-only credentials issued. Scope permissions verified against least-privilege standards.`,
+      telemetryCode: 'AUTH_SUCCESS_READ_ONLY',
+      telemetryDetail: 'OAuth 2.0 PKCE flow completed. Token hash registered safely with read-only scopes.',
+      refId: 'auth-ref-success-2001',
+      primaryCtaLabel: 'Continue to scope configuration',
+      primaryCtaAction: () => navigate('/connect-source/scope'),
+      secondaryCtaLabel: 'Re-authorize connection',
+      secondaryCtaAction: () => navigate('/connect-source/authorize'),
+      isError: false,
+    },
+    denied: {
+      badgeClass: 'status-denied',
+      badgeText: 'Access Denied',
+      title: `Authorization declined by ${providerName}`,
+      subtitle: `The consent request was declined during the OAuth handoff step by the account owner or provider.`,
+      telemetryCode: 'ERR_OAUTH_ACCESS_DENIED',
+      telemetryDetail: 'Permission request was explicitly denied or canceled. No tokens or account credentials were generated.',
+      refId: 'auth-ref-denied-8492',
+      primaryCtaLabel: 'Retry authorization',
+      primaryCtaAction: () => navigate('/connect-source/authorize'),
+      secondaryCtaLabel: 'Choose another provider',
+      secondaryCtaAction: () => navigate('/connect-source/provider'),
+      isError: true,
+    },
+    expired: {
+      badgeClass: 'status-expired',
+      badgeText: 'Session Expired',
+      title: 'OAuth state token expired',
+      subtitle: 'The authorization handoff timed out before completion. Session state hashes have been safely invalidated.',
+      telemetryCode: 'ERR_OAUTH_SESSION_EXPIRED',
+      telemetryDetail: 'State verification token expired after 15 minutes of inactivity. Anti-CSRF tokens cleared.',
+      refId: 'auth-ref-expired-3091',
+      primaryCtaLabel: 'Restart authorization',
+      primaryCtaAction: () => navigate('/connect-source/authorize'),
+      secondaryCtaLabel: 'Choose another provider',
+      secondaryCtaAction: () => navigate('/connect-source/provider'),
+      isError: true,
+    },
+    mismatch: {
+      badgeClass: 'status-denied',
+      badgeText: 'State Mismatch',
+      title: 'OAuth state verification failed',
+      subtitle:
+        'The state token returned by the provider did not match your active session. This can happen if the link was tampered with or opened in a different tab.',
+      telemetryCode: 'ERR_OAUTH_STATE_MISMATCH',
+      telemetryDetail:
+        'Anti-CSRF state nonce validation failed. No credentials were accepted; restart authorization to generate a fresh state token.',
+      refId: 'auth-ref-mismatch-4019',
+      primaryCtaLabel: 'Restart authorization',
+      primaryCtaAction: () => navigate('/connect-source/authorize'),
+      secondaryCtaLabel: 'Choose another provider',
+      secondaryCtaAction: () => navigate('/connect-source/provider'),
+      isError: true,
+    },
+    unknown: {
+      badgeClass: 'status-unknown',
+      badgeText: 'Handoff Error',
+      title: 'Unexpected OAuth response',
+      subtitle: 'An unrecognized or malformed payload was received during the revenue provider redirect.',
+      telemetryCode: 'ERR_OAUTH_INVALID_RESPONSE',
+      telemetryDetail: 'Callback URI payload failed validation checks. Raw error parameters omitted for telemetry safety.',
+      refId: 'auth-ref-unknown-9182',
+      primaryCtaLabel: 'Try connecting again',
+      primaryCtaAction: () => navigate('/connect-source/authorize'),
+      secondaryCtaLabel: 'Return to provider selection',
+      secondaryCtaAction: () => navigate('/connect-source/provider'),
+      isError: true,
+    },
+  }
+
+  const currentDetails = stateDetails[currentState]
+
+  return (
+    <div className="wizard-step-body oauth-callback-wrapper">
+      {/* State Switcher for visual inspection and review */}
+      <div className="oauth-state-tabs" role="tablist" aria-label="OAuth callback state variants">
+        {(['success', 'denied', 'expired', 'unknown'] as OAuthCallbackState[]).map((tabState) => (
+          <button
+            key={tabState}
+            type="button"
+            role="tab"
+            aria-selected={currentState === tabState}
+            className={`oauth-state-tab ${currentState === tabState ? 'is-active' : ''}`}
+            onClick={() => setOAuthCallbackState(tabState)}
+          >
+            {tabState.charAt(0).toUpperCase() + tabState.slice(1)}
+          </button>
+        ))}
+      </div>
+
+      {/* Main Landing Card */}
+      <section className="app-card wizard-inline-card">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <ProviderLogo provider={data.provider} />
+            <span className={`oauth-status-badge ${currentDetails.badgeClass}`} role="status">
+              {currentDetails.badgeText}
+            </span>
+          </div>
+          <span style={{ fontSize: '0.8rem', color: 'var(--muted)', fontFamily: 'monospace' }}>
+            {currentDetails.refId}
+          </span>
+        </div>
+
+        <h3 style={{ fontSize: '1.25rem', marginBottom: '0.35rem' }}>{currentDetails.title}</h3>
+        <p className="wizard-supporting-copy" style={{ marginBottom: '1.25rem' }}>
+          {currentDetails.subtitle}
+        </p>
+
+        {/* Provider-supplied error details when present */}
+        {currentDetails.isError && (data.oauthError || data.oauthErrorDescription) ? (
+          <div className="wizard-inline-alert" role="alert" style={{ marginBottom: '1rem' }}>
+            {data.oauthError ? <strong>{data.oauthError}: </strong> : null}
+            {data.oauthErrorDescription ?? 'Authorization could not be completed.'}
+          </div>
+        ) : null}
+
+        {/* Telemetry-Safe Error / Status Details */}
+        <div className="oauth-telemetry-box" role={currentDetails.isError ? 'alert' : 'status'}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <strong style={{ fontSize: '0.85rem', color: currentDetails.isError ? 'var(--danger)' : 'var(--success)' }}>
+              Telemetry Record: {currentDetails.telemetryCode}
+            </strong>
+            <span style={{ fontSize: '0.75rem', color: 'var(--muted)' }}>Safe Logging Standard</span>
+          </div>
+          <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--muted)' }}>
+            {currentDetails.telemetryDetail}
+          </p>
+        </div>
+
+        {/* Scope Summary (shown on Success state or partial context) */}
+        {currentState === 'success' ? (
+          <div className="oauth-scope-summary" style={{ marginTop: '1.25rem' }}>
+            <h4>Scope Summary & Data Access Rights</h4>
+            <ul className="wizard-list" style={{ margin: 0 }}>
+              {requiredScopes.map((scope) => (
+                <li key={scope}>{scope}</li>
+              ))}
+              {data.optionalScopes.map((optId) => (
+                <li key={optId} style={{ color: 'var(--accent)' }}>
+                  Optional scope: {optId}
+                </li>
+              ))}
+            </ul>
+            <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--muted)' }}>
+              🔒 Least-Privilege Guarantee: Read-only permissions active. Veritasor cannot initiate payments, withdraw funds, or alter revenue source configurations.
+            </p>
+          </div>
+        ) : null}
+
+        {/* Action Buttons */}
+        <div className="oauth-action-bar">
+          <button
+            type="button"
+            className="app-button app-button-primary"
+            onClick={currentDetails.primaryCtaAction}
+          >
+            {currentDetails.primaryCtaLabel}
+          </button>
+          <button
+            type="button"
+            className="app-button app-button-secondary"
+            onClick={currentDetails.secondaryCtaAction}
+          >
+            {currentDetails.secondaryCtaLabel}
+          </button>
+        </div>
+      </section>
     </div>
   )
 }
@@ -529,6 +996,7 @@ export function ConfigureSourceScopeStep() {
               const isChecked = data.syncWindow === windowOption.id
 
               return (
+                // eslint-disable-next-line jsx-a11y/label-has-associated-control -- label wraps radio input and nested sync window text
                 <label key={windowOption.id} className="wizard-choice-card">
                   <input
                     className="wizard-choice-input"
@@ -569,6 +1037,7 @@ export function ConfigureSourceScopeStep() {
         </ul>
         <div className="wizard-checkbox-list">
           {optionalScopes.map((scope) => (
+            // eslint-disable-next-line jsx-a11y/label-has-associated-control -- label wraps checkbox input and nested scope description
             <label key={scope.id} className="wizard-checkbox">
               <input
                 type="checkbox"
@@ -591,6 +1060,10 @@ export function ConfirmSourceStep() {
   const { data, providerName, setConfirmLeastPrivilege } = useWizardContext()
   const syncWindowLabel =
     syncWindows.find((windowOption) => windowOption.id === data.syncWindow)?.label ?? 'Not set'
+
+  const unmappedCount = data.currencyMappings.filter(
+    (r) => r.category === null || r.ledgerAccount === null,
+  ).length
 
   return (
     <div className="wizard-step-body">
@@ -622,9 +1095,18 @@ export function ConfirmSourceStep() {
                 : 'None added'}
             </dd>
           </div>
+          <div>
+            <dt>Currency mapping</dt>
+            <dd>
+              {unmappedCount === 0
+                ? `${data.currencyMappings.length} currencies mapped`
+                : `${unmappedCount} of ${data.currencyMappings.length} unmapped`}
+            </dd>
+          </div>
         </dl>
       </section>
 
+      {/* eslint-disable-next-line jsx-a11y/label-has-associated-control -- label wraps checkbox input and nested confirmation text */}
       <label className="wizard-checkbox wizard-checkbox-confirm">
         <input
           type="checkbox"
@@ -639,6 +1121,270 @@ export function ConfirmSourceStep() {
           </span>
         </span>
       </label>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// MapCurrenciesStep — #223
+// ---------------------------------------------------------------------------
+
+export function MapCurrenciesStep() {
+  const { data, setCurrencyMapping } = useWizardContext()
+  const [search, setSearch] = useState('')
+  const searchId = useId()
+  const alertId = useId()
+
+  const { currencyMappings, mappingValidationAttempted } = data
+
+  const hasUnmapped = currencyMappings.some(
+    (row) => row.category === null || row.ledgerAccount === null,
+  )
+
+  const filtered = currencyMappings.filter((row) =>
+    row.currency.toLowerCase().includes(search.toLowerCase()),
+  )
+
+  return (
+    <div className="wizard-step-body">
+      {/* Context callout */}
+      <div className="wizard-callout">
+        <h3>Why this step matters</h3>
+        <p className="wizard-supporting-copy">
+          Each currency the source reports must be mapped to an internal revenue category and a
+          ledger account. Unmapped currencies will be excluded from attestation evidence until
+          they are assigned. Defaults are pre-filled where Veritasor can infer a safe choice.
+        </p>
+      </div>
+
+      {/* Validation alert — shown inline when user tries to advance with unmapped rows */}
+      {mappingValidationAttempted && hasUnmapped && (
+        <div id={alertId} className="wizard-inline-alert" role="alert">
+          All currencies must have a category and ledger account assigned before continuing.
+          Rows flagged below are missing one or both values.
+        </div>
+      )}
+
+      <section className="app-card wizard-inline-card">
+        <h3>Currency and ledger mapping</h3>
+
+        {/* Search */}
+        <div style={{ marginBottom: '0.75rem' }}>
+          <label htmlFor={searchId} className="sr-only">
+            Search currencies
+          </label>
+          <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+            <span
+              aria-hidden="true"
+              style={{
+                position: 'absolute',
+                left: '0.875rem',
+                color: 'var(--muted)',
+                fontSize: '1rem',
+                pointerEvents: 'none',
+              }}
+            >
+              🔍
+            </span>
+            <input
+              id={searchId}
+              type="search"
+              placeholder="Search by currency code…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              aria-label="Search currencies"
+              style={{
+                width: '100%',
+                minHeight: '2.75rem',
+                padding: '0.6rem 0.875rem 0.6rem 2.5rem',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-sm)',
+                background: 'rgba(15,23,42,0.82)',
+                color: 'var(--text)',
+                font: 'inherit',
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Two-column mapping table */}
+        <div
+          role="table"
+          aria-label="Currency mapping"
+          aria-describedby={mappingValidationAttempted && hasUnmapped ? alertId : undefined}
+          style={{ display: 'grid', gap: '0.5rem' }}
+        >
+          {/* Header row */}
+          <div
+            role="row"
+            aria-hidden="true"
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '5rem 1fr 1fr auto',
+              gap: '0.75rem',
+              padding: '0.4rem 0.875rem',
+              fontSize: '0.72rem',
+              fontWeight: 700,
+              textTransform: 'uppercase',
+              letterSpacing: '0.07em',
+              color: 'var(--muted)',
+            }}
+          >
+            <span>Currency</span>
+            <span>Category</span>
+            <span>Ledger account</span>
+            <span style={{ width: '1.25rem' }} />
+          </div>
+
+          {filtered.length === 0 ? (
+            <p style={{ margin: '0.5rem 0', color: 'var(--muted)', fontSize: '0.9rem', textAlign: 'center' }}>
+              No currencies match "{search}".
+            </p>
+          ) : (
+            filtered.map((row) => {
+              const isUnmapped =
+                mappingValidationAttempted &&
+                (row.category === null || row.ledgerAccount === null)
+              const categorySelectId = `cat-${row.currency}`
+              const ledgerSelectId = `ledger-${row.currency}`
+
+              return (
+                <div
+                  key={row.currency}
+                  role="row"
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '5rem 1fr 1fr auto',
+                    gap: '0.75rem',
+                    alignItems: 'center',
+                    padding: '0.6rem 0.875rem',
+                    borderRadius: 'var(--radius-sm)',
+                    border: isUnmapped
+                      ? '1px solid rgba(251,113,133,0.45)'
+                      : '1px solid var(--border)',
+                    background: isUnmapped
+                      ? 'rgba(251,113,133,0.06)'
+                      : 'rgba(148,163,184,0.04)',
+                  }}
+                >
+                  {/* Currency code */}
+                  <span
+                    role="cell"
+                    style={{
+                      fontWeight: 700,
+                      fontFamily: '"SF Mono","Fira Code",monospace',
+                      fontSize: '0.9rem',
+                      color: 'var(--text)',
+                    }}
+                  >
+                    {row.currency}
+                  </span>
+
+                  {/* Category select */}
+                  <div role="cell">
+                    <label htmlFor={categorySelectId} className="sr-only">
+                      {row.currency} internal category
+                    </label>
+                    <select
+                      id={categorySelectId}
+                      value={row.category ?? ''}
+                      onChange={(e) => setCurrencyMapping(row.currency, 'category', e.target.value)}
+                      aria-invalid={isUnmapped && row.category === null}
+                      style={{
+                        width: '100%',
+                        minHeight: '2.5rem',
+                        padding: '0.4rem 2rem 0.4rem 0.75rem',
+                        border: `1px solid ${isUnmapped && row.category === null ? 'var(--danger)' : 'var(--border)'}`,
+                        borderRadius: 'var(--radius-sm)',
+                        background: 'rgba(15,23,42,0.82)',
+                        color: row.category === null ? 'rgba(173,192,217,0.55)' : 'var(--text)',
+                        font: 'inherit',
+                        fontSize: '0.88rem',
+                        appearance: 'none',
+                        backgroundImage:
+                          "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23adc0d9' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E\")",
+                        backgroundRepeat: 'no-repeat',
+                        backgroundPosition: 'right 0.625rem center',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <option value="">— Select category —</option>
+                      {CATEGORY_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Ledger account select */}
+                  <div role="cell">
+                    <label htmlFor={ledgerSelectId} className="sr-only">
+                      {row.currency} ledger account
+                    </label>
+                    <select
+                      id={ledgerSelectId}
+                      value={row.ledgerAccount ?? ''}
+                      onChange={(e) =>
+                        setCurrencyMapping(row.currency, 'ledgerAccount', e.target.value)
+                      }
+                      aria-invalid={isUnmapped && row.ledgerAccount === null}
+                      style={{
+                        width: '100%',
+                        minHeight: '2.5rem',
+                        padding: '0.4rem 2rem 0.4rem 0.75rem',
+                        border: `1px solid ${isUnmapped && row.ledgerAccount === null ? 'var(--danger)' : 'var(--border)'}`,
+                        borderRadius: 'var(--radius-sm)',
+                        background: 'rgba(15,23,42,0.82)',
+                        color: row.ledgerAccount === null ? 'rgba(173,192,217,0.55)' : 'var(--text)',
+                        font: 'inherit',
+                        fontSize: '0.88rem',
+                        appearance: 'none',
+                        backgroundImage:
+                          "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23adc0d9' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E\")",
+                        backgroundRepeat: 'no-repeat',
+                        backgroundPosition: 'right 0.625rem center',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <option value="">— Select ledger —</option>
+                      {LEDGER_OPTIONS.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Unmapped flag indicator */}
+                  <span
+                    role="cell"
+                    aria-label={isUnmapped ? `${row.currency} has unmapped fields` : undefined}
+                    style={{
+                      width: '1.25rem',
+                      textAlign: 'center',
+                      color: isUnmapped ? 'var(--danger)' : 'var(--success)',
+                      fontSize: '0.85rem',
+                    }}
+                  >
+                    {isUnmapped ? '✗' : row.category !== null && row.ledgerAccount !== null ? '✓' : ''}
+                  </span>
+                </div>
+              )
+            })
+          )}
+        </div>
+
+        {/* Summary footer */}
+        <p
+          role="status"
+          aria-live="polite"
+          style={{ margin: '0.75rem 0 0', fontSize: '0.82rem', color: 'var(--muted)' }}
+        >
+          {currencyMappings.filter((r) => r.category !== null && r.ledgerAccount !== null).length}
+          {' '}of {currencyMappings.length} currencies fully mapped
+        </p>
+      </section>
     </div>
   )
 }

@@ -1,0 +1,694 @@
+/**
+ * Focused behavior coverage for useOnboardingDraft (issue #640):
+ * BusinessDetails, OwnerDetails, DocumentUpload, representative invalid
+ * inputs, and the hook's primary state transitions.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, renderHook, waitFor } from '@testing-library/react'
+import {
+  useOnboardingDraft,
+  reconcileDrafts,
+  DRAFT_SYNC_DEBOUNCE_MS,
+} from './useOnboardingDraft'
+import type {
+  BankDetails,
+  BusinessDetails,
+  DocumentUpload,
+  OnboardingDraft,
+  OwnerDetails,
+} from './useOnboardingDraft'
+
+const STORAGE_KEY = 'veritasor_onboarding_draft'
+
+const BUSINESS: BusinessDetails = {
+  legalName: 'Acme Trading Ltd',
+  registrationNumber: 'RC-1234567',
+  country: 'NG',
+  businessType: 'retail',
+  website: 'https://acme.example',
+}
+
+const OWNER: OwnerDetails = {
+  fullName: 'Ada Lovelace',
+  dateOfBirth: '1990-01-02',
+  nationality: 'NG',
+  addressLine1: '1 Analytical Engine Way',
+  addressLine2: 'Suite 5',
+  city: 'Lagos',
+  postalCode: '100001',
+}
+
+const DOCUMENTS: DocumentUpload = {
+  registrationCert: ['cert.pdf'],
+  govIdFront: ['front.jpg'],
+  govIdBack: ['back.jpg'],
+  proofOfAddress: ['bill.pdf', 'bill-2.pdf'],
+}
+
+const BANK: BankDetails = {
+  bankName: 'Example Bank',
+  accountNumber: '0123456789',
+  ibanSwift: 'EXAMPLENG001',
+  currency: 'NGN',
+}
+
+function readStored(): OnboardingDraft | null {
+  const raw = localStorage.getItem(STORAGE_KEY)
+  return raw ? (JSON.parse(raw) as OnboardingDraft) : null
+}
+
+beforeEach(() => {
+  localStorage.clear()
+  vi.restoreAllMocks()
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  localStorage.clear()
+})
+
+describe('useOnboardingDraft — initial state', () => {
+  it('returns the empty default draft on a fresh install', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    expect(result.current.draft.step).toBe(1)
+    expect(result.current.draft.business).toEqual({
+      legalName: '',
+      registrationNumber: '',
+      country: '',
+      businessType: '',
+      website: '',
+    })
+    expect(result.current.draft.owner.fullName).toBe('')
+    expect(result.current.draft.selfie).toEqual({ captured: false, fileName: '' })
+    expect(result.current.draft.documents).toEqual({
+      registrationCert: [],
+      govIdFront: [],
+      govIdBack: [],
+      proofOfAddress: [],
+    })
+    expect(result.current.draft.bank).toEqual({
+      bankName: '',
+      accountNumber: '',
+      ibanSwift: '',
+      currency: '',
+    })
+  })
+
+  it('does not report a savedAt timestamp when nothing was persisted', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    expect(result.current.savedAt).toBeNull()
+  })
+
+  it('restores a persisted draft, merged over the defaults', () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ step: 3, business: BUSINESS, owner: OWNER }),
+    )
+
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    expect(result.current.draft.step).toBe(3)
+    expect(result.current.draft.business).toEqual(BUSINESS)
+    expect(result.current.draft.owner).toEqual(OWNER)
+    // Sections absent from the stored draft fall back to their defaults.
+    expect(result.current.draft.bank).toEqual({
+      bankName: '',
+      accountNumber: '',
+      ibanSwift: '',
+      currency: '',
+    })
+  })
+
+  it('marks savedAt when a draft already exists in storage', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ step: 2 }))
+
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    await waitFor(() => expect(result.current.savedAt).not.toBeNull())
+    expect(result.current.savedAt).toBeInstanceOf(Date)
+  })
+
+  it('falls back to the defaults when the stored draft is corrupt JSON', () => {
+    localStorage.setItem(STORAGE_KEY, '{not-valid-json')
+
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    expect(result.current.draft.step).toBe(1)
+    expect(result.current.draft.business.legalName).toBe('')
+  })
+})
+
+describe('useOnboardingDraft — setDraft partial merge', () => {
+  it('merges a partial patch at the top level and keeps untouched sections', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      result.current.setDraft({ business: BUSINESS })
+    })
+
+    expect(result.current.draft.business).toEqual(BUSINESS)
+    expect(result.current.draft.step).toBe(1)
+    expect(result.current.draft.owner.fullName).toBe('')
+  })
+
+  it('persists the merged draft to localStorage and stamps savedAt', async () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      result.current.setDraft({ documents: DOCUMENTS })
+    })
+
+    await waitFor(() => expect(result.current.savedAt).not.toBeNull())
+    expect(readStored()?.documents).toEqual(DOCUMENTS)
+  })
+
+  it('uses the updater form against the previous draft (wizard pattern)', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      result.current.setDraft(prev => ({ ...prev, business: BUSINESS, step: 2 }))
+    })
+    act(() => {
+      result.current.setDraft(prev => ({ ...prev, owner: OWNER, step: 3 }))
+    })
+
+    expect(result.current.draft.step).toBe(3)
+    expect(result.current.draft.business).toEqual(BUSINESS)
+    expect(result.current.draft.owner).toEqual(OWNER)
+  })
+})
+
+describe('useOnboardingDraft — BusinessDetails', () => {
+  it('stores every BusinessDetails field', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      result.current.setDraft(prev => ({ ...prev, business: BUSINESS }))
+    })
+
+    expect(result.current.draft.business).toEqual(BUSINESS)
+    expect(result.current.draft.business.website).toBe('https://acme.example')
+  })
+
+  it('advances the step while preserving the other sections', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      result.current.setDraft(prev => ({ ...prev, business: BUSINESS, step: 2 }))
+    })
+
+    expect(result.current.draft.step).toBe(2)
+    expect(result.current.draft.documents).toEqual({
+      registrationCert: [],
+      govIdFront: [],
+      govIdBack: [],
+      proofOfAddress: [],
+    })
+  })
+})
+
+describe('useOnboardingDraft — OwnerDetails', () => {
+  it('stores every OwnerDetails field', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      result.current.setDraft(prev => ({ ...prev, owner: OWNER, step: 3 }))
+    })
+
+    expect(result.current.draft.owner).toEqual(OWNER)
+    expect(result.current.draft.owner.addressLine2).toBe('Suite 5')
+  })
+
+  it('accepts an empty optional second address line', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      result.current.setDraft(prev => ({ ...prev, owner: { ...OWNER, addressLine2: '' } }))
+    })
+
+    expect(result.current.draft.owner.addressLine2).toBe('')
+  })
+})
+
+describe('useOnboardingDraft — DocumentUpload', () => {
+  it('stores multiple file names per document field', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      result.current.setDraft(prev => ({ ...prev, documents: DOCUMENTS, step: 5 }))
+    })
+
+    expect(result.current.draft.documents).toEqual(DOCUMENTS)
+    expect(result.current.draft.documents.proofOfAddress).toHaveLength(2)
+  })
+
+  it('allows clearing a document field back to an empty list', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      result.current.setDraft(prev => ({ ...prev, documents: DOCUMENTS }))
+    })
+    act(() => {
+      result.current.setDraft(prev => ({
+        ...prev,
+        documents: { ...prev.documents, proofOfAddress: [] },
+      }))
+    })
+
+    expect(result.current.draft.documents.proofOfAddress).toEqual([])
+    expect(result.current.draft.documents.registrationCert).toEqual(['cert.pdf'])
+  })
+})
+
+describe('useOnboardingDraft — BankDetails and persistence lifecycle', () => {
+  it('stores BankDetails', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      result.current.setDraft(prev => ({ ...prev, bank: BANK, step: 6 }))
+    })
+
+    expect(result.current.draft.bank).toEqual(BANK)
+    expect(result.current.draft.step).toBe(6)
+  })
+
+  it('round-trips the draft across a remount', () => {
+    const first = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      first.result.current.setDraft(prev => ({ ...prev, business: BUSINESS, step: 2 }))
+    })
+    first.unmount()
+
+    const second = renderHook(() => useOnboardingDraft())
+    expect(second.result.current.draft.business).toEqual(BUSINESS)
+    expect(second.result.current.draft.step).toBe(2)
+  })
+
+  it('clearDraft wipes storage and resets to the defaults', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      result.current.setDraft(prev => ({ ...prev, business: BUSINESS, step: 4 }))
+    })
+    expect(localStorage.getItem(STORAGE_KEY)).not.toBeNull()
+
+    act(() => {
+      result.current.clearDraft()
+    })
+
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
+    expect(result.current.draft.step).toBe(1)
+    expect(result.current.draft.business.legalName).toBe('')
+    expect(result.current.savedAt).toBeNull()
+  })
+})
+
+describe('useOnboardingDraft — restored draft validation (issue #854)', () => {
+  const FULL_DRAFT = {
+    version: 1,
+    step: 6,
+    business: BUSINESS,
+    owner: OWNER,
+    selfie: { captured: true, fileName: 'selfie.jpg' },
+    documents: DOCUMENTS,
+    bank: BANK,
+  }
+
+  it.each([
+    ['an invalid JSON payload', '{not-valid-json', 1],
+    ['a null draft', 'null', 1],
+    ['an array draft', '[]', 1],
+    ['a step below the valid range', JSON.stringify({ ...FULL_DRAFT, step: 0 }), 1],
+    ['a step above the valid range', JSON.stringify({ ...FULL_DRAFT, step: 99 }), 6],
+    ['a numeric string step', JSON.stringify({ ...FULL_DRAFT, step: '3' }), 3],
+    ['a fractional step', JSON.stringify({ ...FULL_DRAFT, step: 4.9 }), 4],
+    ['a non-numeric step', JSON.stringify({ ...FULL_DRAFT, step: 'two' }), 1],
+  ])('normalises %s', (_name, raw, expectedStep) => {
+    localStorage.setItem(STORAGE_KEY, raw)
+
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    expect(result.current.draft.step).toBe(expectedStep)
+    expect(result.current.draft.step).toBeGreaterThanOrEqual(1)
+    expect(result.current.draft.step).toBeLessThanOrEqual(6)
+  })
+
+  it('restores a step 5 draft with empty business details to step 1', () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ ...FULL_DRAFT, step: 5, business: null }),
+    )
+
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    expect(result.current.draft.step).toBe(1)
+    expect(result.current.draft.business).toEqual({
+      legalName: '',
+      registrationNumber: '',
+      country: '',
+      businessType: '',
+      website: '',
+    })
+  })
+
+  it.each([
+    ['business details are incomplete', { step: 4, business: { ...BUSINESS, legalName: '' } }, 1],
+    ['owner details are incomplete', { step: 4, owner: { ...OWNER, city: '' } }, 2],
+    ['the selfie is missing', { step: 5, selfie: { captured: false, fileName: '' } }, 3],
+    ['documents are missing', { step: 6, documents: { ...DOCUMENTS, govIdBack: [] } }, 4],
+    ['bank details are missing', { step: 6, bank: { ...BANK, ibanSwift: '' } }, 5],
+  ])('clamps to the first incomplete step when %s', (_name, patch, expectedStep) => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...FULL_DRAFT, ...patch }))
+
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    expect(result.current.draft.step).toBe(expectedStep)
+  })
+
+  it('deep-merges each nested section with the defaults and coerces field types', () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        step: 2,
+        business: {
+          legalName: 'Acme Trading Ltd',
+          registrationNumber: 1234567,
+          country: 'NG',
+          businessType: 'retail',
+          website: null,
+        },
+        owner: { fullName: 'Ada Lovelace', city: 42 },
+        selfie: { captured: 'yes', fileName: 7 },
+        documents: { registrationCert: 'cert.pdf', govIdFront: [1, 'front.jpg', null] },
+      }),
+    )
+
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    expect(result.current.draft.business).toEqual({
+      legalName: 'Acme Trading Ltd',
+      registrationNumber: '',
+      country: 'NG',
+      businessType: 'retail',
+      website: '',
+    })
+    expect(result.current.draft.owner).toEqual({
+      fullName: 'Ada Lovelace',
+      dateOfBirth: '',
+      nationality: '',
+      addressLine1: '',
+      addressLine2: '',
+      city: '',
+      postalCode: '',
+    })
+    expect(result.current.draft.selfie).toEqual({ captured: false, fileName: '' })
+    expect(result.current.draft.documents).toEqual({
+      registrationCert: [],
+      govIdFront: ['front.jpg'],
+      govIdBack: [],
+      proofOfAddress: [],
+    })
+    expect(result.current.draft.bank).toEqual({
+      bankName: '',
+      accountNumber: '',
+      ibanSwift: '',
+      currency: '',
+    })
+  })
+})
+
+describe('useOnboardingDraft — storage failures', () => {
+  it('still updates in-memory state when localStorage.setItem throws', () => {
+    const setItem = vi
+      .spyOn(Storage.prototype, 'setItem')
+      .mockImplementation(() => {
+        throw new Error('QuotaExceededError')
+      })
+
+    const { result } = renderHook(() => useOnboardingDraft())
+    setItem.mockClear()
+
+    expect(() => {
+      act(() => {
+        result.current.setDraft({ business: BUSINESS })
+      })
+    }).not.toThrow()
+
+    expect(result.current.draft.business).toEqual(BUSINESS)
+    // The write failed, so no new savedAt timestamp is reported.
+    expect(result.current.savedAt).toBeNull()
+  })
+
+  it('does not throw when storage access fails on read', () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('SecurityError')
+    })
+
+    expect(() => renderHook(() => useOnboardingDraft())).not.toThrow()
+  })
+})
+
+describe('useOnboardingDraft — security #852: isolation, TTL, and legacy migration', () => {
+  it('excludes sensitive keys (DOB, address, account number, IBAN) from localStorage', () => {
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    act(() => {
+      result.current.setDraft({
+        business: BUSINESS,
+        owner: OWNER,
+        bank: BANK,
+        step: 6,
+      })
+    })
+
+    const rawLocal = localStorage.getItem(STORAGE_KEY)
+    expect(rawLocal).not.toBeNull()
+    const stored = JSON.parse(rawLocal!)
+
+    // Non-sensitive fields should be preserved in localStorage
+    expect(stored.business.legalName).toBe(BUSINESS.legalName)
+    expect(stored.owner.fullName).toBe(OWNER.fullName)
+    expect(stored.bank.bankName).toBe(BANK.bankName)
+    expect(stored.bank.currency).toBe(BANK.currency)
+
+    // Sensitive owner fields must NOT be in localStorage
+    expect(stored.owner.dateOfBirth).toBeUndefined()
+    expect(stored.owner.nationality).toBeUndefined()
+    expect(stored.owner.addressLine1).toBeUndefined()
+    expect(stored.owner.addressLine2).toBeUndefined()
+    expect(stored.owner.city).toBeUndefined()
+    expect(stored.owner.postalCode).toBeUndefined()
+
+    // Sensitive bank fields must NOT be in localStorage
+    expect(stored.bank.accountNumber).toBeUndefined()
+    expect(stored.bank.ibanSwift).toBeUndefined()
+
+    // In-memory state still retains the full draft
+    expect(result.current.draft.owner).toEqual(OWNER)
+    expect(result.current.draft.bank).toEqual(BANK)
+  })
+
+  it('purges drafts older than the TTL on load', () => {
+    const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60 * 1000
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        step: 2,
+        business: BUSINESS,
+        owner: { fullName: OWNER.fullName },
+        bank: { bankName: BANK.bankName, currency: BANK.currency },
+        updatedAt: eightDaysAgo,
+      }),
+    )
+
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    // Expired draft discarded -> falls back to initial empty draft
+    expect(result.current.draft.business.legalName).toBe('')
+    expect(result.current.draft.step).toBe(1)
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
+  })
+
+  it('keeps drafts that are within the TTL', () => {
+    const oneDayAgo = Date.now() - 1 * 24 * 60 * 60 * 1000
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        step: 2,
+        business: BUSINESS,
+        owner: { fullName: OWNER.fullName },
+        bank: { bankName: BANK.bankName, currency: BANK.currency },
+        updatedAt: oneDayAgo,
+      }),
+    )
+
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    expect(result.current.draft.business.legalName).toBe(BUSINESS.legalName)
+    expect(result.current.draft.step).toBe(2)
+  })
+
+  it('clears legacy plaintext full draft on first load', () => {
+    // Legacy draft with full plaintext sensitive fields in localStorage
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        step: 2,
+        business: BUSINESS,
+        owner: OWNER,
+        bank: BANK,
+      }),
+    )
+
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    // Legacy draft wiped from localStorage and reset to initial
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
+    expect(result.current.draft.bank.accountNumber).toBe('')
+    expect(result.current.draft.owner.dateOfBirth).toBe('')
+  })
+})
+
+describe('useOnboardingDraft — server sync and reconciliation', () => {
+  it('reconciles with server draft on load when remote updatedAt is newer', async () => {
+    const olderLocal = Date.now() - 10_000
+    const newerRemote = Date.now()
+
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        step: 1,
+        business: { ...BUSINESS, legalName: 'Old Local Name' },
+        updatedAt: olderLocal,
+      }),
+    )
+
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          draft: {
+            version: 1,
+            step: 2,
+            business: { ...BUSINESS, legalName: 'Newer Server Name' },
+          },
+          updatedAt: newerRemote,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    await waitFor(() => {
+      expect(result.current.draft.business.legalName).toBe('Newer Server Name')
+    })
+    expect(result.current.draft.step).toBe(2)
+    expect(result.current.syncStatus).toBe('synced')
+  })
+
+  it('keeps local draft when local updatedAt is newer than remote', async () => {
+    const newerLocal = Date.now()
+    const olderRemote = Date.now() - 60_000
+
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        step: 2,
+        business: { ...BUSINESS, legalName: 'Newer Local Name' },
+        updatedAt: newerLocal,
+      }),
+    )
+
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          draft: {
+            version: 1,
+            step: 1,
+            business: { ...BUSINESS, legalName: 'Older Server Name' },
+          },
+          updatedAt: olderRemote,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { result } = renderHook(() => useOnboardingDraft())
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1))
+    expect(result.current.draft.business.legalName).toBe('Newer Local Name')
+  })
+
+  it('debounces PUT /api/onboarding/draft on setDraft and handles 409 conflict', async () => {
+    vi.useFakeTimers()
+    try {
+      const mockFetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+        if (init?.method === 'PUT') {
+          return new Response(
+            JSON.stringify({
+              draft: {
+                version: 1,
+                step: 2,
+                business: { ...BUSINESS, legalName: 'Server Conflict Winner' },
+              },
+              updatedAt: Date.now() + 5000,
+            }),
+            { status: 409, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        return new Response(null, { status: 404 })
+      })
+      vi.stubGlobal('fetch', mockFetch)
+
+      const { result } = renderHook(() => useOnboardingDraft())
+
+      act(() => {
+        result.current.setDraft({ business: { ...BUSINESS, legalName: 'Edit 1' } })
+        result.current.setDraft({ business: { ...BUSINESS, legalName: 'Edit 2' } })
+      })
+
+      // Not sent before debounce elapses
+      const putCallsBefore = mockFetch.mock.calls.filter(([, init]) => init?.method === 'PUT')
+      expect(putCallsBefore).toHaveLength(0)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DRAFT_SYNC_DEBOUNCE_MS + 50)
+      })
+
+      const putCallsAfter = mockFetch.mock.calls.filter(([, init]) => init?.method === 'PUT')
+      expect(putCallsAfter).toHaveLength(1)
+      expect(result.current.syncStatus).toBe('conflict')
+      expect(result.current.draft.business.legalName).toBe('Server Conflict Winner')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reconcileDrafts pure helper picks the newer timestamp', () => {
+    const localDraft = {
+      version: 1,
+      step: 1,
+      business: BUSINESS,
+      owner: OWNER,
+      selfie: { captured: false, fileName: '' },
+      documents: DOCUMENTS,
+      bank: BANK,
+    }
+    const res = reconcileDrafts(localDraft, 1000, {
+      draft: { ...localDraft, business: { ...BUSINESS, legalName: 'Remote Co' } },
+      updatedAt: 2000,
+    })
+    expect(res.source).toBe('remote')
+    expect(res.draft.business.legalName).toBe('Remote Co')
+  })
+})

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 export interface AttestationDetails {
   source: string
@@ -7,13 +7,30 @@ export interface AttestationDetails {
   merkleRoot: string
 }
 
+export interface FeeBreakdownItem {
+  label: string
+  amount: number
+}
+
+export interface FeeInfo {
+  total: number
+  breakdown: FeeBreakdownItem[]
+}
+
 export interface AttestationConfirmModalProps {
   open: boolean
   onClose: () => void
-  onConfirm: () => void
+  onConfirm: () => void | Promise<unknown>
   isLoading?: boolean
   error?: string | null
   details?: AttestationDetails | null
+  feeInfo?: FeeInfo | null
+}
+
+function formatErrorMessage(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message
+  if (typeof err === 'string' && err) return err
+  return 'Failed to submit attestation. Please try again.'
 }
 
 const FOCUSABLE =
@@ -27,9 +44,25 @@ export default function AttestationConfirmModal({
   isLoading = false,
   error = null,
   details = null,
+  feeInfo = null,
 }: AttestationConfirmModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
+  const [showFeeBreakdown, setShowFeeBreakdown] = useState(false)
+  const [isPending, setIsPending] = useState(false)
+  const [internalError, setInternalError] = useState<string | null>(null)
+  const pendingRef = useRef(false)
+  const isMountedRef = useRef(true)
   const triggerRef = useRef<HTMLElement | null>(null)
+
+  const pending = isLoading || isPending
+  const displayError = error || internalError
+
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [])
 
   // Save the element that triggered the modal; move focus to dialog on open; restore on close
   useEffect(() => {
@@ -37,6 +70,7 @@ export default function AttestationConfirmModal({
       triggerRef.current = document.activeElement as HTMLElement
       dialogRef.current!.focus()
     } else {
+      setInternalError(null)
       triggerRef.current?.focus()
     }
   }, [open])
@@ -73,13 +107,41 @@ export default function AttestationConfirmModal({
   }, [open, onClose])
 
   function handleBackdropClick() {
-    if (!isLoading) onClose()
+    if (!pending) onClose()
+  }
+
+  function handleConfirm() {
+    if (pending || pendingRef.current) return
+    setInternalError(null)
+    try {
+      const result = onConfirm()
+      if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+        pendingRef.current = true
+        setIsPending(true)
+        Promise.resolve(result)
+          .catch((err: unknown) => {
+            if (isMountedRef.current) {
+              setInternalError(formatErrorMessage(err))
+            }
+          })
+          .finally(() => {
+            pendingRef.current = false
+            if (isMountedRef.current) {
+              setIsPending(false)
+            }
+          })
+      }
+    } catch (err: unknown) {
+      setInternalError(formatErrorMessage(err))
+    }
   }
 
   if (!open) return null
 
   return (
+    // eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- backdrop click dismisses modal; Escape key is handled via keydown listener
     <div className="modal-backdrop" onClick={handleBackdropClick}>
+      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-noninteractive-element-interactions -- stops click propagation from dialog to backdrop */}
       <div
         ref={dialogRef}
         role="dialog"
@@ -139,14 +201,45 @@ export default function AttestationConfirmModal({
             </p>
           )}
 
+          <section className="fee-preview" aria-labelledby="fee-preview-title">
+            <h3 id="fee-preview-title" className="fee-preview-title">Estimated Fee</h3>
+            <div className="fee-compact">
+              {feeInfo ? (
+                <span>{feeInfo.total.toLocaleString()} XLM</span>
+              ) : (
+                <span aria-live="polite">Calculating fee…</span>
+              )}
+            </div>
+            {feeInfo && (
+  <>
+    <button
+      type="button"
+      className="fee-toggle"
+      aria-expanded={showFeeBreakdown}
+      aria-controls="fee-breakdown-list"
+      onClick={() => setShowFeeBreakdown(!showFeeBreakdown)}
+    >
+      {showFeeBreakdown ? 'Hide breakdown' : 'View breakdown'}
+    </button>
+    {showFeeBreakdown && (
+      <ul id="fee-breakdown-list" className="fee-breakdown">
+        {feeInfo.breakdown.map((item, i) => (
+          <li key={i}>{item.label}: {item.amount.toLocaleString()} XLM</li>
+        ))}
+      </ul>
+    )}
+  </>
+)}
+          </section>
+
           <div className="modal-warning">
             <span aria-hidden="true" className="modal-warning-icon">⚠</span>
             <span>This action cannot be undone. Attested data is permanent on-chain.</span>
           </div>
 
-          {error && (
+          {displayError && (
             <p role="alert" className="modal-error">
-              {error}
+              {displayError}
             </p>
           )}
         </div>
@@ -156,18 +249,18 @@ export default function AttestationConfirmModal({
             type="button"
             className="modal-btn modal-btn-cancel"
             onClick={onClose}
-            disabled={isLoading}
+            disabled={pending}
           >
             Cancel
           </button>
           <button
             type="button"
             className="modal-btn modal-btn-confirm"
-            onClick={onConfirm}
-            disabled={isLoading}
-            aria-busy={isLoading}
+            onClick={handleConfirm}
+            disabled={pending}
+            aria-busy={pending}
           >
-            {isLoading ? 'Attesting…' : 'Confirm & Attest'}
+            {pending ? 'Attesting…' : 'Confirm & Attest'}
           </button>
         </div>
       </div>
