@@ -7,6 +7,7 @@ import { AttestationCalendar } from '../components/scheduling/AttestationCalenda
 import { getAttestationChartGeometry, getAttestationChartLabelIndices } from '../utils/attestationChartData'
 import { extractIsoDate, isValidIsoDate } from '../utils/dashboardSelectors'
 import { EmptyStateIllustration } from '../components/EmptyStateIllustrations'
+import { AttestationsSkeleton } from '../components/SkeletonLoader'
 import SearchFilter, { parseFilterState, type ChipDef } from '../components/SearchFilter'
 import { useToast } from '../components/ToastContext'
 import { useAttestations, type Attestation } from '../state/attestations'
@@ -754,7 +755,16 @@ export default function Attestations() {
   const [modalOpen, setModalOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const { list: attestations, trigger } = useAttestations()
+  const {
+    list: attestations,
+    status: loadStatus,
+    error: loadError,
+    hasMore,
+    isLoadingMore,
+    loadMore,
+    refresh,
+    trigger,
+  } = useAttestations()
   const { addToast } = useToast()
   const [searchParams, setSearchParams] = useSearchParams()
   const [activeView, setActiveView] = useState<'overview' | 'schedule'>('overview')
@@ -1047,9 +1057,89 @@ export default function Attestations() {
             </button>
           )}
         </section>
+          {loadStatus === 'loading' && attestations.length === 0 ? (
+            <div style={{ marginTop: '1.5rem' }}>
+              <AttestationsSkeleton />
+            </div>
+          ) : loadStatus === 'error' && attestations.length === 0 ? (
+            <div
+              role="alert"
+              style={{
+                marginTop: '1.5rem',
+                padding: '1.5rem',
+                borderRadius: 12,
+                border: '1px solid var(--danger)',
+                background: 'var(--danger-soft)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '1rem',
+                flexWrap: 'wrap',
+              }}
+            >
+              <div>
+                <strong style={{ display: 'block', marginBottom: '0.25rem' }}>
+                  Failed to load attestations
+                </strong>
+                <span>{loadError ?? 'An unexpected error occurred.'}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => void refresh()}
+                style={{
+                  minHeight: 'var(--density-touch-min)',
+                  padding: '0.5rem 1rem',
+                  borderRadius: 10,
+                  border: '1px solid var(--border)',
+                  background: 'var(--surface)',
+                  color: 'var(--text)',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          ) : (
+            <>
+              {attestations.length > 0 && <AttestationTrendChart attestations={attestations} />}
 
-          <section aria-label="Attestation runs" style={{ marginTop: '1.5rem' }}>
-          {attestations.length === 0 ? (
+              <section aria-label="Attestation runs" style={{ marginTop: '1.5rem' }}>
+                {loadStatus === 'error' && loadError && (
+                  <div
+                    role="alert"
+                    style={{
+                      marginBottom: '1rem',
+                      padding: '1rem',
+                      borderRadius: 12,
+                      border: '1px solid var(--danger)',
+                      background: 'var(--danger-soft)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '1rem',
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <span>{loadError}</span>
+                    <button
+                      type="button"
+                      onClick={() => void (hasMore ? loadMore() : refresh())}
+                      style={{
+                        padding: '0.4rem 0.85rem',
+                        borderRadius: 8,
+                        border: '1px solid var(--border)',
+                        background: 'var(--surface)',
+                        color: 'var(--text)',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+                {attestations.length === 0 ? (
             <EmptyState onRunReport={handleOpenModal} />
           ) : filteredAttestations.length === 0 ? (
             <div
@@ -1170,6 +1260,30 @@ export default function Attestations() {
                       </button>
                     </nav>
                   )}
+
+                  {hasMore && (
+                    <div style={{ display: 'flex', justifyContent: 'center', marginTop: '1.25rem' }}>
+                      <button
+                        type="button"
+                        onClick={() => void loadMore()}
+                        disabled={isLoadingMore}
+                        aria-busy={isLoadingMore}
+                        style={{
+                          minHeight: 'var(--density-touch-min)',
+                          padding: '0.55rem 1.25rem',
+                          borderRadius: 10,
+                          border: '1px solid var(--border)',
+                          background: 'var(--surface)',
+                          color: 'var(--text)',
+                          fontWeight: 700,
+                          cursor: isLoadingMore ? 'not-allowed' : 'pointer',
+                          opacity: isLoadingMore ? 0.7 : 1,
+                        }}
+                      >
+                        {isLoadingMore ? 'Loading…' : 'Load more'}
+                      </button>
+                    </div>
+                  )}
                 </>
               )}
             </>
@@ -1179,7 +1293,9 @@ export default function Attestations() {
               ))}
             </ol>
           )}
-          </section>
+              </section>
+            </>
+          )}
         </section>
       </div>
 

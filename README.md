@@ -79,6 +79,7 @@ cp .env.example .env
 | Variable | Default | Description |
 |---|---|---|
 | `VITE_API_URL` | `http://localhost:3000` | Base URL for backend API requests |
+| `VITE_USE_MOCKS` | `true` | Use in-memory mock API adapters (`false` enables live HTTP requests) |
 | `VITE_SESSION_DURATION_MINUTES` | `30` | Session timeout duration in minutes |
 | `VITE_SESSION_WARNING_BEFORE_MINUTES` | `5` | Minutes before session expiry to show the warning modal |
 

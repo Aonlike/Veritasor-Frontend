@@ -9,10 +9,13 @@ import StatusTimeline, {
 } from '../components/StatusTimeline'
 import ProofShareModal from '../components/ProofShareModal'
 import ConfirmDialog from '../components/ConfirmDialog'
+import { AttestationsSkeleton } from '../components/SkeletonLoader'
+import NotFound from './NotFound'
 import './AttestationCertificate.print.css'
 import { useAttestations } from '../state/attestations'
 import { useLocale } from '../i18n/useLocale'
 import { formatDate, formatNumber } from '../i18n/formatters'
+import { useAttestations, type Attestation } from '../state/attestations'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -357,6 +360,15 @@ export default function AttestationDetail() {
   const { locale } = useLocale()
   const { getById } = useAttestations()
   const attestation = id ? getById(id) : undefined
+  const { getById, fetchById } = useAttestations()
+  const storeAttestation = id ? getById(id) : undefined
+  const [fetchedAttestation, setFetchedAttestation] = useState<Attestation | null>(null)
+  const [detailState, setDetailState] = useState<'idle' | 'loading' | 'not-found' | 'error'>(
+    id && !storeAttestation ? 'loading' : 'idle',
+  )
+  const [detailError, setDetailError] = useState<string | null>(null)
+  const [fetchAttempt, setFetchAttempt] = useState(0)
+  const attestation = storeAttestation ?? (fetchedAttestation?.id === id ? fetchedAttestation : undefined)
   const stellarExplorer = STELLAR_EXPLORER_BASE[environment]
   const [printedOn, setPrintedOn] = useState<string | null>(null)
   const [now] = useState(() => new Date())
@@ -375,6 +387,44 @@ export default function AttestationDetail() {
   useEffect(() => {
     setPrintedOn(null)
   }, [id])
+
+  useEffect(() => {
+    if (!id) {
+      setDetailState('idle')
+      setDetailError(null)
+      return
+    }
+    if (storeAttestation) {
+      setDetailState('idle')
+      setDetailError(null)
+      return
+    }
+
+    let cancelled = false
+    setDetailState('loading')
+    setDetailError(null)
+
+    fetchById(id)
+      .then((result) => {
+        if (cancelled) return
+        if (!result) {
+          setFetchedAttestation(null)
+          setDetailState('not-found')
+        } else {
+          setFetchedAttestation(result)
+          setDetailState('idle')
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setDetailError(err instanceof Error ? err.message : 'Failed to load attestation.')
+        setDetailState('error')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [id, storeAttestation, fetchById, fetchAttempt])
 
   const handlePrint = useCallback(() => {
     // Flush the printed-on timestamp synchronously into the DOM so the footer
@@ -432,7 +482,18 @@ export default function AttestationDetail() {
     )
   }
 
-  if (!attestation) {
+  if (!attestation && detailState === 'loading') {
+    return (
+      <div>
+        <Breadcrumb items={[{ label: 'Attestations', href: '/attestations' }, { label: id }]} />
+        <div style={{ marginTop: '1.5rem' }}>
+          <AttestationsSkeleton />
+        </div>
+      </div>
+    )
+  }
+
+  if (!attestation && detailState === 'error') {
     return (
       <div>
         <Breadcrumb items={[{ label: 'Attestations', href: '/attestations' }, { label: id }]} />
@@ -442,16 +503,39 @@ export default function AttestationDetail() {
           style={{
             marginTop: '2rem',
             padding: '1.5rem',
-            background: 'var(--surface)',
-            border: '1px solid var(--border)',
+            background: 'var(--danger-soft)',
+            border: '1px solid var(--danger)',
             borderRadius: 'var(--radius-sm)',
-            color: 'var(--muted)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '1rem',
+            flexWrap: 'wrap',
           }}
         >
-          Attestation <strong style={{ color: 'var(--text)' }}>{id}</strong> was not found.
+          <span>{detailError ?? 'Failed to load attestation.'}</span>
+          <button
+            type="button"
+            onClick={() => setFetchAttempt((count) => count + 1)}
+            style={{
+              padding: '0.5rem 1rem',
+              borderRadius: '0.5rem',
+              border: '1px solid var(--border)',
+              background: 'var(--surface)',
+              color: 'var(--text)',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            Retry
+          </button>
         </div>
       </div>
     )
+  }
+
+  if (!attestation) {
+    return <NotFound />
   }
 
   const currentAttestation = { ...attestation, status: retryStatus ?? attestation.status }
